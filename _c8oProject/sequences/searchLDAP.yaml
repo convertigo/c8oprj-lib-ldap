@@ -1,0 +1,131 @@
+accessibility: Hidden
+↓Complex [steps.XMLComplexStep-1613139192431]: 
+  nodeName: results
+↓Sequence_JS [steps.SimpleStep-1613133322181]: 
+  expression: |
+    '// imports
+    var TWSLDAP = use("com.twinsoft.util.TWSLDAP");
+    var LDAPAuthenticationStep = use("com.twinsoft.convertigo.beans.steps.LDAPAuthenticationStep");
+    var URL = use("java.net.URL");
+    var XMLUtils = use(''com.twinsoft.convertigo.engine.util.XMLUtils'');
+    var StringUtils = use("org.apache.commons.lang3.StringUtils");
+    // end imports
+    
+    // functions class
+    var getHost = function (ldap_url) {
+    	var host = "";
+        try {
+            var ldapURL = new URL(ldap_url.replace("ldap","http"));
+    		host = ldapURL.getHost();
+        }
+        catch (e) {
+            log.error(e);
+        }
+        return host;
+    };
+    // end functions class
+    
+    // utils
+    var pRDN = java.util.regex.Pattern.compile("(\\w+)=([^,]*),?");
+    var stepNode = context.getXpathApi().selectNode(dom, "/document/results");
+    var doc = context.outputDocument;
+    // end utils
+    
+    var searchHost = getHost(ldapServer);
+    var searchLogin = adminUser;
+    var searchPassword = adminPassword;
+    var searchBase = ldapBasePath;
+    var searchAttributesI = [];
+    returnedAttributes.forEach((x)=>{
+    	searchAttributesI.push(x)
+    })
+    var countLimit = 0;
+    var timeLimit = 0;
+    
+    var rdn = includeRDN === true || includeRDN == "true";
+    var twsLDAP = new TWSLDAP();
+    twsLDAP.search(searchHost, searchLogin, searchPassword, searchBase, searchFilter, searchAttributesI, timeLimit, countLimit);
+    
+    while(twsLDAP.hasMoreResults()){
+    	var userDn = twsLDAP.getNextResult().toLowerCase() + (searchBase == null ? "":"," + searchBase.toLowerCase());
+    	var mRDN = pRDN.matcher(userDn);
+    	var obj = {"results":[]};
+    	var el = doc.createElement("item");
+    	if(rdn){
+    		while (mRDN.find()) {
+    			var rdn = doc.createElement("rdn");
+    			rdn.setAttribute("name", mRDN.group(1));
+    			rdn.setTextContent(mRDN.group(2));
+    			el.appendChild(rdn);
+    		}
+    	}
+    	
+    	searchAttributesI.forEach(attribute =>{
+    		if (StringUtils.isNotBlank(attribute)) {
+    			var values = twsLDAP.getResultEx(attribute);
+    			if (values != null) {
+    				values.forEach(value => {
+    					var attr = doc.createElement(attribute);
+    					//attr.setAttribute("name", attribute);
+    					attr.setTextContent(value);
+    					el.appendChild(attr);
+    				})
+    			}
+    		}
+    	})
+    	if(el.length > 0){
+    		stepNode.appendChild(el);
+    	}
+    }'
+↓adminUser [variables.RequestableVariable-1613133356279]: 
+  comment: A valid ActiveDirectory Admin Account with read privileges used to search for the user attributes. If this is not provided, the group membership information will not be returned.
+  value: ${lib_LDAP.adminUser}
+↓ldapServer [variables.RequestableVariable-1613133356285]: 
+  comment: The Active Directory server ldap url as ldap(s)://server:port. Mandatory.
+  value: ${lib_LDAP.ldapServer}
+↓ldapBasePath [variables.RequestableVariable-1613133356288]: 
+  comment: 'The active directory user user to sign in. May be a valid domain account ex: ''DOMAIN\user'' or the user''s email ex: ''user@domain.com'' or just the users full name ex:  ''John doe'''
+  value: ${lib_LDAP.ldapBasePath}
+↓adminPassword [variables.RequestableVariable-1613133449114]: 
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: x9660edbcfb70b9132871bb20141d4fcf9dc7a751c8e24fc8670f1c6f82ed6763b1595e619e070cbfb519937aa69faed9
+  visibility: '-1'
+↓searchFilter [variables.RequestableVariable-1613140293154]: 
+  value: (objectClass=*)
+↓includeRDN [variables.RequestableVariable-1613140442916]: 
+  value: false
+↓returnedAttributes [variables.RequestableMultiValuedVariable-1613141069937]: 
+  value: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: displayName
+        - java.lang.String: 
+          - ↑value: mail
+↓Test_Case_Users [core.TestCase]: 
+  ↓adminUser [variables.TestCaseVariable-1613140367430]: 
+    value: TWINSOFT2K\administrator
+  ↓ldapServer [variables.TestCaseVariable-1613140367432]: 
+    value: ldap://92.188.2.65:389
+  ↓ldapBasePath [variables.TestCaseVariable-1613140367434]: 
+    value: DC=twinsoft,DC=fr
+  ↓domainNameUser [variables.TestCaseVariable-1613140367436]: 
+    value: TWINSOFT2K
+  ↓adminPassword [variables.TestCaseVariable-1613140367438]: 
+    value: bhytrd
+  ↓searchFilter [variables.TestCaseVariable-1613140367440]: 
+    value: (objectClass=user)
+  ↓includeRDN [variables.TestCaseVariable-1613140593112]: 
+    value: true
+  ↓returnedAttributes [variables.TestCaseMultiValuedVariable-1613141974892]: 
+    value: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: displayName
+          - java.lang.String: 
+            - ↑value: mail
