@@ -1,5 +1,5 @@
 # lib_LDAP
-This is the LDAP library for Convertigo platform. Install this library to request LDAP for your Convertigo applications.
+This is the LDAP library for Convertigo platform. Install this library to execute LDAP requests for your Convertigo applications.
 
 # Installation
 
