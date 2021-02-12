@@ -1,4 +1,4 @@
-↑convertigo: 7.9.0.m006
+↑convertigo: 7.6.0.m006
 ↓lib_LDAP [core.Project]: 
   comment: Mashup Sequencer project
   ↓void [connectors.SqlConnector]: 🗏 connectors/void.yaml
