@@ -1,5 +1,5 @@
 # lib_LDAP
-This is the LDAP library for Convertigo platform. Install this library to request LDAP for your Convertigo applications.
+This is the LDAP library for Convertigo platform. Install this library to execute LDAP requests for your Convertigo applications.
 
 # Installation
 
@@ -20,7 +20,7 @@ __lib_LDAP__ needs some symbols to be configured. You configure them through the
 
 Symbol  | value
 ------| ------
-lib_LDAP.adminUser | LDAP **Administrator user** which have administrator rights
+lib_LDAP.adminUser | LDAP **Administrator user** having administrator rights
 lib_LDAP.adminPassword.secret | LDAP **Administrator password**
 lib_LDAP.ldapBasePath | LDAP **Search Base** for the queries (for example: DC=TWINSOFT,DC=FR)
 lib_LDAP.ldapServer | LDAP **Server URL** formatted as ldap://example.com:389
