@@ -1,5 +1,6 @@
 ↑convertigo: 7.6.0.m006
 ↓lib_LDAP [core.Project]: 
   comment: Mashup Sequencer project
+  version: 1.0
   ↓void [connectors.SqlConnector]: 🗏 connectors/void.yaml
   ↓searchLDAP [sequences.GenericSequence]: 🗏 sequences/searchLDAP.yaml
