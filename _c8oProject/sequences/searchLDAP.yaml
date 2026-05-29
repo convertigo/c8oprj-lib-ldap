@@ -1,80 +1,220 @@
-accessibility: Hidden
+accessibility: Private
 ↓Complex [steps.XMLComplexStep-1613139192431]: 
   nodeName: results
 ↓Sequence_JS [steps.SimpleStep-1613133322181]: 
   expression: |
-    '// imports
-    var TWSLDAP = use("com.twinsoft.util.TWSLDAP");
-    var LDAPAuthenticationStep = use("com.twinsoft.convertigo.beans.steps.LDAPAuthenticationStep");
+    'var Context = javax.naming.Context;
+    var SearchControls = javax.naming.directory.SearchControls;
+    var InitialLdapContext = javax.naming.ldap.InitialLdapContext;
     var URL = use("java.net.URL");
-    var XMLUtils = use(''com.twinsoft.convertigo.engine.util.XMLUtils'');
     var StringUtils = use("org.apache.commons.lang3.StringUtils");
-    // end imports
     
-    // functions class
-    var getHost = function (ldap_url) {
-    	var host = "";
-        try {
-            var ldapURL = new URL(ldap_url.replace("ldap","http"));
-    		host = ldapURL.getHost();
-        }
-        catch (e) {
-            log.error(e);
-        }
-        return host;
+    var isBlank = function (value) {
+    	return value == null || value == undefined || StringUtils.trimToEmpty("" + value) === "";
     };
-    // end functions class
     
-    // utils
+    var getConnectionSettings = function (ldapUrl) {
+    	var settings = {
+    		useSSL: false,
+    		host: "",
+    		port: 389,
+    		providerUrl: ""
+    	};
+    	try {
+    		var normalizedUrl = StringUtils.trimToEmpty("" + ldapUrl);
+    		settings.useSSL = normalizedUrl.indexOf("ldaps://") === 0;
+    		var parsedUrl = new URL(normalizedUrl.replace("ldaps://", "https://").replace("ldap://", "http://"));
+    		settings.host = parsedUrl.getHost();
+    		settings.port = parsedUrl.getPort() > 0 ? parsedUrl.getPort() : (settings.useSSL ? 636 : 389);
+    		settings.providerUrl = "ldap://" + settings.host + ":" + settings.port;
+    	}
+    	catch (e) {
+    		log.error("Unable to parse ldapServer \"" + ldapUrl + "\" : " + e);
+    	}
+    	return settings;
+    };
+    
+    var createLdapContext = function (ldapUrl, login, password) {
+    	var settings = getConnectionSettings(ldapUrl);
+    	var env = new java.util.Hashtable();
+    	env.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.ldap.LdapCtxFactory");
+    	env.put(Context.PROVIDER_URL, settings.providerUrl);
+    	if (settings.useSSL) {
+    		env.put(Context.SECURITY_PROTOCOL, "ssl");
+    	}
+    	if (isBlank(login)) {
+    		env.put(Context.SECURITY_AUTHENTICATION, "none");
+    	}
+    	else {
+    		env.put(Context.SECURITY_AUTHENTICATION, "simple");
+    		env.put(Context.SECURITY_PRINCIPAL, "" + login);
+    		env.put(Context.SECURITY_CREDENTIALS, password == null || password == undefined ? "" : "" + password);
+    	}
+    	return new InitialLdapContext(env, null);
+    };
+    
+    var createStringArray = function (values) {
+    	var javaArray = java.lang.reflect.Array.newInstance(java.lang.String, values.length);
+    	for (var i = 0; i < values.length; i++) {
+    		javaArray[i] = "" + values[i];
+    	}
+    	return javaArray;
+    };
+    
+    var isSizeLimitExceeded = function (error) {
+    	return error instanceof javax.naming.SizeLimitExceededException
+    		|| (error != null && error.javaException != null && error.javaException instanceof javax.naming.SizeLimitExceededException)
+    		|| ("" + error).indexOf("SizeLimitExceededException") !== -1;
+    };
+    
+    var isPartialResult = function (error) {
+    	return error instanceof javax.naming.PartialResultException
+    		|| (error != null && error.javaException != null && error.javaException instanceof javax.naming.PartialResultException)
+    		|| ("" + error).indexOf("PartialResultException") !== -1;
+    };
+    
+    var getNextSearchResult = function (searchResults, label) {
+    	try {
+    		if (!searchResults.hasMore()) {
+    			return null;
+    		}
+    		return searchResults.next();
+    		}
+    		catch (e) {
+    			if (isSizeLimitExceeded(e)) {
+    				log.warn("LDAP search stopped after size limit was reached for " + label + ": " + e);
+    				return null;
+    			}
+    			if (isPartialResult(e)) {
+    				log.warn("LDAP search stopped after continuation references were returned for " + label + ": " + e);
+    				return null;
+    			}
+    			throw e;
+    		}
+    	};
+    
+    var toAttributeValues = function (attribute) {
+    	var values = [];
+    	if (attribute == null || attribute == undefined) {
+    		return values;
+    	}
+    	var allValues = attribute.getAll();
+    	try {
+    		while (allValues.hasMore()) {
+    			var value = allValues.next();
+    			if (value != null && value != undefined) {
+    				values.push("" + value);
+    			}
+    		}
+    	}
+    	finally {
+    		if (allValues != null) {
+    			try {
+    				allValues.close();
+    			}
+    			catch (e) {
+    			}
+    		}
+    	}
+    	return values;
+    };
+    
+    var getDistinguishedName = function (searchResult, searchBase) {
+    	var distinguishedName = "";
+    	try {
+    		distinguishedName = StringUtils.trimToEmpty("" + searchResult.getNameInNamespace());
+    	}
+    	catch (e) {
+    	}
+    	if (distinguishedName === "") {
+    		var relativeDn = StringUtils.trimToEmpty("" + searchResult.getName());
+    		distinguishedName = relativeDn;
+    		if (distinguishedName !== "" && !isBlank(searchBase) && StringUtils.indexOfIgnoreCase(distinguishedName, searchBase) === -1) {
+    			distinguishedName += "," + searchBase;
+    		}
+    		else if (distinguishedName === "" && !isBlank(searchBase)) {
+    			distinguishedName = "" + searchBase;
+    		}
+    	}
+    	return distinguishedName;
+    };
+    
     var pRDN = java.util.regex.Pattern.compile("(\\w+)=([^,]*),?");
     var stepNode = context.getXpathApi().selectNode(dom, "/document/results");
     var doc = context.outputDocument;
-    // end utils
-    
-    var searchHost = getHost(ldapServer);
-    var searchLogin = adminUser;
-    var searchPassword = adminPassword;
-    var searchBase = ldapBasePath;
-    var searchAttributesI = [];
-    returnedAttributes.forEach((x)=>{
-    	searchAttributesI.push(x)
-    })
-    var countLimit = 0;
-    var timeLimit = 0;
-    
-    var rdn = includeRDN === true || includeRDN == "true";
-    var twsLDAP = new TWSLDAP();
-    twsLDAP.search(searchHost, searchLogin, searchPassword, searchBase, searchFilter, searchAttributesI, timeLimit, countLimit);
-    
-    while(twsLDAP.hasMoreResults()){
-    	var userDn = twsLDAP.getNextResult().toLowerCase() + (searchBase == null ? "":"," + searchBase.toLowerCase());
-    	var mRDN = pRDN.matcher(userDn);
-    	var obj = {"results":[]};
-    	var el = doc.createElement("item");
-    	if(rdn){
-    		while (mRDN.find()) {
-    			var rdn = doc.createElement("rdn");
-    			rdn.setAttribute("name", mRDN.group(1));
-    			rdn.setTextContent(mRDN.group(2));
-    			el.appendChild(rdn);
+    var searchBase = isBlank(ldapBasePath) ? "" : "" + ldapBasePath;
+    var searchFilterValue = isBlank(searchFilter) ? "(objectClass=*)" : "" + searchFilter;
+    var searchAttributes = [];
+    if (returnedAttributes != null && returnedAttributes != undefined && returnedAttributes.length != undefined) {
+    	for (var i = 0; i < returnedAttributes.length; i++) {
+    		if (!isBlank(returnedAttributes[i])) {
+    			searchAttributes.push("" + returnedAttributes[i]);
     		}
     	}
+    }
+    var rdnEnabled = includeRDN === true || includeRDN == "true";
+    var searchResults = null;
+    var ldapContext = null;
+    
+    try {
+    	ldapContext = createLdapContext(ldapServer, adminUser, adminPassword);
+    	var searchControls = new SearchControls();
+    	searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
+    	searchControls.setReturningAttributes(createStringArray(searchAttributes));
+    	searchControls.setTimeLimit(0);
+    	searchControls.setCountLimit(0);
+    	searchResults = ldapContext.search(searchBase, searchFilterValue, searchControls);
     	
-    	searchAttributesI.forEach(attribute =>{
-    		if (StringUtils.isNotBlank(attribute)) {
-    			var values = twsLDAP.getResultEx(attribute);
-    			if (values != null) {
-    				values.forEach(value => {
-    					var attr = doc.createElement(attribute);
-    					//attr.setAttribute("name", attribute);
-    					attr.setTextContent(value);
-    					el.appendChild(attr);
-    				})
+    	while (true) {
+    		var searchResult = getNextSearchResult(searchResults, "searchLDAP");
+    		if (searchResult == null) {
+    			break;
+    		}
+    		var userDn = getDistinguishedName(searchResult, searchBase).toLowerCase();
+    		var mRDN = pRDN.matcher(userDn);
+    		var el = doc.createElement("item");
+    		if (rdnEnabled) {
+    			while (mRDN.find()) {
+    				var rdnNode = doc.createElement("rdn");
+    				rdnNode.setAttribute("name", mRDN.group(1));
+    				rdnNode.setTextContent(mRDN.group(2));
+    				el.appendChild(rdnNode);
     			}
     		}
-    	})
-    	if(el.length > 0){
-    		stepNode.appendChild(el);
+    		
+    		var attributes = searchResult.getAttributes();
+    		for (var j = 0; j < searchAttributes.length; j++) {
+    			var attributeName = searchAttributes[j];
+    			if (StringUtils.isBlank(attributeName)) {
+    				continue;
+    			}
+    			var attributeValues = toAttributeValues(attributes == null ? null : attributes.get(attributeName));
+    			for (var k = 0; k < attributeValues.length; k++) {
+    				var attr = doc.createElement(attributeName);
+    				attr.setTextContent(attributeValues[k]);
+    				el.appendChild(attr);
+    			}
+    		}
+    		
+    		if (el.hasChildNodes()) {
+    			stepNode.appendChild(el);
+    		}
+    	}
+    }
+    finally {
+    	if (searchResults != null) {
+    		try {
+    			searchResults.close();
+    		}
+    		catch (e) {
+    		}
+    	}
+    	if (ldapContext != null) {
+    		try {
+    			ldapContext.close();
+    		}
+    		catch (e) {
+    		}
     	}
     }'
 ↓adminUser [variables.RequestableVariable-1613133356279]: 

@@ -1,0 +1,678 @@
+accessibility: Private
+comment: Synchronizes directory users into Forms user documents and reserved groups.
+responseTimeout: 600
+↓Input_variables [steps.InputVariablesStep-1774272301000]: 
+↓Init_Pagination [steps.SimpleStep-1776185313071]: 
+  expression: |
+    'var normalizeOptionalText = function(value) {
+    	if (value === undefined || value === null) {
+    		return "";
+    	}
+    	return ("" + value).replace(/^\s+|\s+$/g, "");
+    };
+    
+    var parseBoolean = function(value, defaultValue) {
+    	var normalized = normalizeOptionalText(value).toLowerCase();
+    	if (normalized === "true" || normalized === "1" || normalized === "yes") {
+    		return true;
+    	}
+    	if (normalized === "false" || normalized === "0" || normalized === "no") {
+    		return false;
+    	}
+    	return defaultValue;
+    };
+    
+    var parseInteger = function(value, defaultValue) {
+    	var normalized = normalizeOptionalText(value);
+    	if (normalized === "") {
+    		return defaultValue;
+    	}
+    	try {
+    		return java.lang.Integer.parseInt(normalized);
+    	}
+    	catch (e) {
+    		return defaultValue;
+    	}
+    };
+    
+    var splitStringValues = function(value) {
+    	var normalized = normalizeOptionalText(value);
+    	if (normalized === "") {
+    		return [];
+    	}
+    	var chunks = normalized.replace(/\r/g, "\n").replace(/,/g, "\n").replace(/;/g, "\n").split("\n");
+    	var values = [];
+    	for (var i = 0; i < chunks.length; i++) {
+    		var chunk = normalizeOptionalText(chunks[i]);
+    		if (chunk !== "") {
+    			values.push(chunk);
+    		}
+    	}
+    	return values;
+    };
+    
+    var containsAnyMarker = function(value, markers) {
+    	if (markers.length === 0) {
+    		return true;
+    	}
+    	var normalized = normalizeOptionalText(value);
+    	if (normalized === "") {
+    		return false;
+    	}
+    	for (var i = 0; i < markers.length; i++) {
+    		if (normalized.indexOf(markers[i]) !== -1) {
+    			return true;
+    		}
+    	}
+    	return false;
+    };
+    
+    var getFirstAttributeValue = function(entry, attributeName) {
+    	if (!entry || !entry.attributes || !entry.attributes[attributeName]) {
+    		return "";
+    	}
+    	var attributeValue = entry.attributes[attributeName];
+    	if (attributeValue instanceof Array) {
+    		return attributeValue.length > 0 ? normalizeOptionalText(attributeValue[0]) : "";
+    	}
+    	return normalizeOptionalText(attributeValue);
+    };
+    
+    var buildDisplayName = function(entry) {
+    	var givenNameValue = normalizeOptionalText(entry ? entry.givenName : "");
+    	if (givenNameValue === "") {
+    		givenNameValue = getFirstAttributeValue(entry, "givenName");
+    	}
+    	var surnameValue = normalizeOptionalText(entry ? entry.sn : "");
+    	if (surnameValue === "") {
+    		surnameValue = getFirstAttributeValue(entry, "sn");
+    	}
+    	if (givenNameValue !== "" && surnameValue !== "") {
+    		return givenNameValue.charAt(0).toUpperCase() + givenNameValue.substring(1).toLowerCase() + " " + surnameValue.toUpperCase();
+    	}
+    	return "";
+    };
+    
+    var formsGroupPrefixValue = normalizeOptionalText(formsGroupPrefix);
+    if (formsGroupPrefixValue === "") {
+    	formsGroupPrefixValue = "C8Oreserved_";
+    }
+    var formsProviderValue = normalizeOptionalText(formsProvider);
+    if (formsProviderValue === "") {
+    	formsProviderValue = "ad";
+    }
+    var formsLanguageValue = normalizeOptionalText(formsLanguage);
+    if (formsLanguageValue === "") {
+    	formsLanguageValue = "fr";
+    }
+    var formsFavoritesValue = normalizeOptionalText(formsFavorites);
+    var formsPublishedFirstValue = parseBoolean(formsPublishedFirst, true);
+    var formsEditingRightsValue = parseBoolean(formsEditingRights, true);
+    var dryRunValue = parseBoolean(dryRun, false);
+    var clearCacheAfterSyncValue = parseBoolean(clearCacheAfterSync, true);
+    var bulkMergeRulesValue = normalizeOptionalText(bulkMergeRules);
+    if (bulkMergeRulesValue === "" || bulkMergeRulesValue === "[object Object]") {
+    	bulkMergeRulesValue = "{\"mail\": \"override\", \"displayName\": \"override\"}";
+    }
+    var userDistinguishedNameMarkersValue = splitStringValues(userDistinguishedNameMarkers);
+    
+    var requestedPageSizeValue = parseInteger(pageSize, 500);
+    if (requestedPageSizeValue <= 0) {
+    	requestedPageSizeValue = 500;
+    }
+    var configuredCountLimitValue = parseInteger(countLimit, 0);
+    var remainingUsersLimit = configuredCountLimitValue > 0 ? configuredCountLimitValue : -1;
+    var currentUserPageSize = requestedPageSizeValue;
+    if (remainingUsersLimit > 0 && currentUserPageSize > remainingUsersLimit) {
+    	currentUserPageSize = remainingUsersLimit;
+    }
+    
+    var currentUserPageCookie = "";
+    var nextUserPageCookieValue = "";
+    var usersHasMorePagesRaw = "false";
+    var usersHasMorePagesValue = currentUserPageSize > 0;
+    var totalUsersFromDirectoryCount = 0;
+    var totalPreparedUserDocumentsCount = 0;
+    var totalPreparedReservedGroupsCount = 0;
+    var totalSkippedUsersCount = 0;
+    var totalFilteredOutUsersCount = 0;
+    var totalProcessedPages = 0;
+    var shouldWriteToFormsAny = false;
+    var shouldSyncReservedGroupsAny = false;
+    var shouldClearCache = false;
+    var shouldWriteCurrentPageToForms = false;
+    var shouldSyncCurrentPageReservedGroups = false;
+    var pageUsersFromDirectoryCount = 0;
+    var pagePreparedUserDocumentsCount = 0;
+    var pagePreparedReservedGroupsCount = 0;
+    var pageSkippedUsersCount = 0;
+    var pageFilteredOutUsersCount = 0;
+    var formsDocumentsJSON = "[]";
+    var skippedUsersJSON = "[]";
+    var syncSummaryJSON = "{}";
+    var syncSummary = {};'
+↓Bulk_Merge_Rules_JSON [steps.ElementStep-1774272301036]: 
+  expression: bulkMergeRulesValue
+  nodeName: bulkMergeRulesJSONSTR
+  output: false
+↓Paged_Sync [steps.DoWhileStep-1776185313079]: 
+  condition: usersHasMorePagesValue === true && currentUserPageSize > 0
+  ↓Current_User_Page_Size [steps.ElementStep-1776185313081]: 
+    expression: currentUserPageSize
+    nodeName: currentUserPageSize
+    output: false
+  ↓Current_User_Page_Cookie [steps.ElementStep-1776185313083]: 
+    expression: currentUserPageCookie
+    nodeName: currentUserPageCookie
+    output: false
+  ↓Call_Sequence [steps.SequenceStep-1776185313085]: 
+    sourceSequence: lib_LDAP.exportDirectoryAccountsAndGroups
+    ↓adminUser [variables.StepVariable-1776185313087]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./adminUser/text()
+    ↓ldapServer [variables.StepVariable-1776185313089]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./ldapServer/text()
+    ↓ldapBasePath [variables.StepVariable-1776185313091]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./ldapBasePath/text()
+    ↓adminPassword [variables.StepVariable-1776185313093]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./adminPassword/text()
+    ↓usersBasePath [variables.StepVariable-1776185313095]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./usersBasePath/text()
+    ↓userSearchFilter [variables.StepVariable-1776185313097]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./userSearchFilter/text()
+    ↓userExclusionFilter [variables.StepVariable-1776185313099]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./userExclusionFilter/text()
+    ↓includeUsers [variables.StepVariable-1776185313101]: 
+      value: true
+    ↓includeGroups [variables.StepVariable-1776185313103]: 
+      value: false
+    ↓emitUsersXML [variables.StepVariable-1776185313105]: 
+      value: false
+    ↓emitGroupsXML [variables.StepVariable-1776185313107]: 
+      value: false
+    ↓emitSummaryXML [variables.StepVariable-1776185313109]: 
+      value: true
+    ↓emitUsersJSON [variables.StepVariable-1776185313111]: 
+      value: true
+    ↓emitGroupsJSON [variables.StepVariable-1776185313113]: 
+      value: false
+    ↓emitDirectoryJSON [variables.StepVariable-1776185313115]: 
+      value: false
+    ↓emitAttributesJSON [variables.StepVariable-1776185313117]: 
+      value: false
+    ↓includeRDN [variables.StepVariable-1776185313119]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./includeRDN/text()
+    ↓countLimit [variables.StepVariable-1776185313121]: 
+      value: 0.0
+    ↓timeLimit [variables.StepVariable-1776185313123]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./timeLimit/text()
+    ↓userReturnedAttributes [variables.StepMultiValuedVariable-1776185313125]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1774272301000
+            - java.lang.String: 
+              - ↑value: ./userReturnedAttributes/text()
+    ↓userPageSize [variables.StepVariable-1776185313127]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1776185313081
+            - java.lang.String: 
+              - ↑value: ./text()
+    ↓userPageCookie [variables.StepVariable-1776185313129]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1776185313083
+            - java.lang.String: 
+              - ↑value: ./text()
+  ↓directoryUsersJson [steps.SimpleSourceStep-1776185313131]: 
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1776185313085
+          - java.lang.String: 
+            - ↑value: ./document/usersJSONSTR/text()
+    variableName: directoryUsersJson
+  ↓Next_User_Page_Cookie [steps.SimpleSourceStep-1776185313133]: 
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1776185313085
+          - java.lang.String: 
+            - ↑value: ./document/summary/nextUserPageCookie/text()
+    variableName: nextUserPageCookieValue
+  ↓Users_Has_More_Pages [steps.SimpleSourceStep-1776185313135]: 
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1776185313085
+          - java.lang.String: 
+            - ↑value: ./document/summary/usersHasMorePages/text()
+    variableName: usersHasMorePagesRaw
+  ↓Build_Forms_Payload [steps.SimpleStep-1776185313137]: 
+    expression: |
+      'var users = [];
+      try {
+      	users = directoryUsersJson !== undefined && directoryUsersJson !== null && normalizeOptionalText(directoryUsersJson) !== "" ? JSON.parse("" + directoryUsersJson) : [];
+      }
+      catch (e) {
+      	users = [];
+      }
+      
+      var userDocuments = [];
+      groupMappings = [];
+      pageSkippedUsersCount = 0;
+      pageFilteredOutUsersCount = 0;
+      
+      for (var i = 0; i < users.length; i++) {
+      	var entry = users[i] || {};
+      	var distinguishedNameValue = normalizeOptionalText(entry.distinguishedName);
+      	if (distinguishedNameValue === "") {
+      		distinguishedNameValue = getFirstAttributeValue(entry, "distinguishedName");
+      	}
+      	if (!containsAnyMarker(distinguishedNameValue, userDistinguishedNameMarkersValue)) {
+      		pageFilteredOutUsersCount++;
+      		continue;
+      	}
+      	var accountName = normalizeOptionalText(entry.accountName);
+      	if (accountName === "") {
+      		accountName = getFirstAttributeValue(entry, "sAMAccountName");
+      	}
+      	if (accountName === "") {
+      		accountName = getFirstAttributeValue(entry, "uid");
+      	}
+      	if (accountName === "") {
+      		pageSkippedUsersCount++;
+      		continue;
+      	}
+      
+      	var groupName = formsGroupPrefixValue + accountName;
+      	var mailValue = normalizeOptionalText(entry.mail);
+      	if (mailValue === "") {
+      		mailValue = getFirstAttributeValue(entry, "mail");
+      	}
+      	var displayNameValue = normalizeOptionalText(entry.displayName);
+      	if (displayNameValue === "") {
+      		displayNameValue = getFirstAttributeValue(entry, "displayName");
+      	}
+      	if (displayNameValue === "") {
+      		displayNameValue = buildDisplayName(entry);
+      	}
+      	if (displayNameValue === "") {
+      		displayNameValue = normalizeOptionalText(entry.commonName);
+      	}
+      	if (displayNameValue === "") {
+      		displayNameValue = getFirstAttributeValue(entry, "cn");
+      	}
+      	if (displayNameValue === "") {
+      		displayNameValue = accountName;
+      	}
+      
+      	userDocuments.push({
+      		_id: groupName,
+      		_c8oAcl: accountName,
+      		favorites: formsFavoritesValue,
+      		published_First: "" + formsPublishedFirstValue,
+      		language: formsLanguageValue,
+      		provider: formsProviderValue,
+      		mail: mailValue,
+      		editing_rights: "" + formsEditingRightsValue,
+      		displayName: displayNameValue,
+      		c8o_view_type_users: true
+      	});
+      
+      	groupMappings.push({
+      		user: accountName,
+      		group: groupName
+      	});
+      }
+      
+      pageUsersFromDirectoryCount = users.length;
+      pagePreparedUserDocumentsCount = userDocuments.length;
+      pagePreparedReservedGroupsCount = groupMappings.length;
+      shouldWriteCurrentPageToForms = dryRunValue !== true && userDocuments.length > 0;
+      shouldSyncCurrentPageReservedGroups = dryRunValue !== true && groupMappings.length > 0;
+      formsDocumentsJSON = JSON.stringify(userDocuments);
+      
+      totalUsersFromDirectoryCount += pageUsersFromDirectoryCount;
+      totalPreparedUserDocumentsCount += pagePreparedUserDocumentsCount;
+      totalPreparedReservedGroupsCount += pagePreparedReservedGroupsCount;
+      totalSkippedUsersCount += pageSkippedUsersCount;
+      totalFilteredOutUsersCount += pageFilteredOutUsersCount;
+      shouldWriteToFormsAny = shouldWriteToFormsAny || shouldWriteCurrentPageToForms;
+      shouldSyncReservedGroupsAny = shouldSyncReservedGroupsAny || shouldSyncCurrentPageReservedGroups;'
+  ↓Forms_Documents_JSON [steps.ElementStep-1776185313139]: 
+    expression: formsDocumentsJSON
+    nodeName: formsDocumentsJSONSTR
+    output: false
+  ↓If_Write_To_Forms [steps.IfStep-1776185313141]: 
+    condition: shouldWriteCurrentPageToForms
+    ↓Call_Transaction [steps.TransactionStep-1776185313143]: 
+      sourceTransaction: lib_LDAP.c8oforms_fs.PostBulkDocuments
+      ↓_use_json_base [variables.StepVariable-1776185313145]: 
+        description: (string) – JSON use as a base for the array of documents (js array), or for individual documents (js object). Optional
+        sourceDefinition: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+            - com.twinsoft.convertigo.beans.common.XMLVector: 
+              - java.lang.String: 
+                - ↑value: 1776185313139
+              - java.lang.String: 
+                - ↑value: ./text()
+      ↓_use_merge [variables.StepVariable-1776185313147]: 
+        sourceDefinition: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+            - com.twinsoft.convertigo.beans.common.XMLVector: 
+              - java.lang.String: 
+                - ↑value: 1774272301036
+              - java.lang.String: 
+                - ↑value: ./text()
+  ↓If_Sync_Reserved_Groups [steps.IfStep-1776185313149]: 
+    condition: shouldSyncCurrentPageReservedGroups
+    ↓Reserved_Groups [steps.XMLComplexStep-1776185313151]: 
+      nodeName: groups
+      output: false
+      ↓Attribute [steps.XMLAttributeStep-1776185313153]: 
+        nodeName: type
+        nodeText: array
+      ↓jIterator [steps.SimpleIteratorStep-1776185313155]: 
+        expression: groupMappings
+        ↓Complex [steps.XMLComplexStep-1776185313157]: 
+          nodeName: Complex
+          ↓Attribute [steps.XMLAttributeStep-1776185313159]: 
+            nodeName: type
+            nodeText: object
+          ↓user [steps.ElementStep-1776185313161]: 
+            expression: groupMappings[index]["user"]
+            nodeName: user
+          ↓group [steps.ElementStep-1776185313163]: 
+            expression: groupMappings[index]["group"]
+            nodeName: group
+    ↓Call_Sequence [steps.SequenceStep-1776185313165]: 
+      sourceSequence: lib_FullSyncGrp.SetUserInGroupBulk
+      ↓bulkOBj [variables.StepMultiValuedVariable-1776185313167]: 
+        sourceDefinition: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+            - com.twinsoft.convertigo.beans.common.XMLVector: 
+              - java.lang.String: 
+                - ↑value: 1776185313151
+              - java.lang.String: 
+                - ↑value: .
+  ↓Advance_Pagination [steps.SimpleStep-1776185313169]: 
+    expression: |
+      'totalProcessedPages++;
+      usersHasMorePagesValue = parseBoolean(usersHasMorePagesRaw, false);
+      if (remainingUsersLimit > 0) {
+      	remainingUsersLimit -= pageUsersFromDirectoryCount;
+      	if (remainingUsersLimit <= 0) {
+      		remainingUsersLimit = 0;
+      		usersHasMorePagesValue = false;
+      	}
+      }
+      
+      if (usersHasMorePagesValue) {
+      	var normalizedNextCookie = normalizeOptionalText(nextUserPageCookieValue);
+      	if (normalizedNextCookie === "" || normalizedNextCookie === currentUserPageCookie) {
+      		if (normalizedNextCookie !== "" && normalizedNextCookie === currentUserPageCookie) {
+      			log.warn("Stopping LDAP sync pagination because the next user page cookie did not change.");
+      		}
+      		usersHasMorePagesValue = false;
+      		currentUserPageCookie = "";
+      	}
+      	else {
+      		currentUserPageCookie = normalizedNextCookie;
+      	}
+      }
+      else {
+      	currentUserPageCookie = "";
+      }
+      
+      currentUserPageSize = requestedPageSizeValue;
+      if (remainingUsersLimit > 0 && currentUserPageSize > remainingUsersLimit) {
+      	currentUserPageSize = remainingUsersLimit;
+      }
+      if (currentUserPageSize <= 0) {
+      	usersHasMorePagesValue = false;
+      }
+      groupMappings = [];
+      formsDocumentsJSON = "[]";
+      directoryUsersJson = "";
+      shouldClearCache = dryRunValue !== true && clearCacheAfterSyncValue === true && (shouldWriteToFormsAny || shouldSyncReservedGroupsAny);'
+↓Finalize_Summary [steps.SimpleStep-1776185313171]: 
+  expression: |
+    'shouldClearCache = dryRunValue !== true && clearCacheAfterSyncValue === true && (shouldWriteToFormsAny || shouldSyncReservedGroupsAny);
+    skippedUsersJSON = "[]";
+    syncSummary = {
+    	dryRun: dryRunValue,
+    	formsGroupPrefix: formsGroupPrefixValue,
+    	formsProvider: formsProviderValue,
+    	formsLanguage: formsLanguageValue,
+    	pageSize: requestedPageSizeValue,
+    	processedPagesCount: totalProcessedPages,
+    	usersFromDirectoryCount: totalUsersFromDirectoryCount,
+    	preparedUserDocumentsCount: totalPreparedUserDocumentsCount,
+    	preparedReservedGroupsCount: totalPreparedReservedGroupsCount,
+    	skippedUsersCount: totalSkippedUsersCount,
+    	filteredOutUsersCount: totalFilteredOutUsersCount,
+    	shouldWriteToForms: shouldWriteToFormsAny,
+    	shouldSyncReservedGroups: shouldSyncReservedGroupsAny,
+    	shouldClearCache: shouldClearCache
+    };
+    syncSummaryJSON = JSON.stringify(syncSummary);'
+↓Skipped_Users_JSON [steps.ElementStep-1774272301038]: 
+  expression: skippedUsersJSON
+  nodeName: skippedUsersJSONSTR
+↓Sync_Summary_JSON [steps.ElementStep-1774272301040]: 
+  expression: syncSummaryJSON
+  nodeName: syncSummaryJSONSTR
+↓Summary [steps.XMLComplexStep-1774272301042]: 
+  nodeName: summary
+  ↓dryRun [steps.ElementStep-1774272301044]: 
+    expression: syncSummary.dryRun
+    nodeName: dryRun
+  ↓formsGroupPrefix [steps.ElementStep-1774272301046]: 
+    expression: syncSummary.formsGroupPrefix
+    nodeName: formsGroupPrefix
+  ↓formsProvider [steps.ElementStep-1774272301048]: 
+    expression: syncSummary.formsProvider
+    nodeName: formsProvider
+  ↓formsLanguage [steps.ElementStep-1774272301050]: 
+    expression: syncSummary.formsLanguage
+    nodeName: formsLanguage
+  ↓usersFromDirectoryCount [steps.ElementStep-1774272301052]: 
+    expression: syncSummary.usersFromDirectoryCount
+    nodeName: usersFromDirectoryCount
+  ↓preparedUserDocumentsCount [steps.ElementStep-1774272301054]: 
+    expression: syncSummary.preparedUserDocumentsCount
+    nodeName: preparedUserDocumentsCount
+  ↓preparedReservedGroupsCount [steps.ElementStep-1774272301056]: 
+    expression: syncSummary.preparedReservedGroupsCount
+    nodeName: preparedReservedGroupsCount
+  ↓skippedUsersCount [steps.ElementStep-1774272301058]: 
+    expression: syncSummary.skippedUsersCount
+    nodeName: skippedUsersCount
+  ↓filteredOutUsersCount [steps.ElementStep-1780055692093]: 
+    expression: syncSummary.filteredOutUsersCount
+    nodeName: filteredOutUsersCount
+  ↓shouldWriteToForms [steps.ElementStep-1774272301060]: 
+    expression: syncSummary.shouldWriteToForms
+    nodeName: shouldWriteToForms
+  ↓shouldSyncReservedGroups [steps.ElementStep-1774272301062]: 
+    expression: syncSummary.shouldSyncReservedGroups
+    nodeName: shouldSyncReservedGroups
+  ↓shouldClearCache [steps.ElementStep-1774272301064]: 
+    expression: syncSummary.shouldClearCache
+    nodeName: shouldClearCache
+  ↓pageSize [steps.ElementStep-1776185313239]: 
+    expression: syncSummary.pageSize
+    nodeName: pageSize
+  ↓processedPagesCount [steps.ElementStep-1776185313245]: 
+    expression: syncSummary.processedPagesCount
+    nodeName: processedPagesCount
+↓If_Clear_Cache [steps.IfStep-1774272301094]: 
+  condition: shouldClearCache
+  ↓clearCacheEntries [steps.SimpleStep-1774272301096]: 
+    expression: com.twinsoft.convertigo.engine.Engine.theApp.cacheManager.clearCacheEntries();
+↓adminUser [variables.RequestableVariable-1774272301098]: 
+  comment: LDAP or Active Directory account used to bind and execute the searches
+  value: ${lib_LDAP.adminUser}
+↓ldapServer [variables.RequestableVariable-1774272301100]: 
+  comment: LDAP server URL in the form ldap(s)://server:port
+  value: ${lib_LDAP.ldapServer}
+↓ldapBasePath [variables.RequestableVariable-1774272301102]: 
+  comment: Default LDAP base DN used when usersBasePath is not provided
+  value: ${lib_LDAP.ldapBasePath}
+↓adminPassword [variables.RequestableVariable-1774272301104]: 
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: x9660edbcfb70b9132871bb20141d4fcf9dc7a751c8e24fc8670f1c6f82ed6763b1595e619e070cbfb519937aa69faed9
+  visibility: '-1'
+↓usersBasePath [variables.RequestableVariable-1774272301106]: 
+  comment: Optional LDAP base DN dedicated to user extraction. Falls back to ldapBasePath when empty.
+↓userSearchFilter [variables.RequestableVariable-1774272301108]: 
+  comment: LDAP filter applied to the directory accounts to import into Forms. Default can be driven by symbol lib_LDAP.userSearchFilter.
+  value: ${lib_LDAP.userSearchFilter=(&(objectCategory=person)(objectClass=user))}
+↓userExclusionFilter [variables.RequestableVariable-1774272301110]: 
+  comment: Optional LDAP filter for directory accounts to exclude from the Forms synchronization. Default can be driven by symbol lib_LDAP.userExclusionFilter.
+  value: ${lib_LDAP.userExclusionFilter=}
+↓userDistinguishedNameMarkers [variables.RequestableVariable-1780055692091]: 
+  comment: Optional comma/newline-separated distinguishedName markers. When provided, only users whose distinguishedName contains at least one marker are synchronized. Default can be driven by symbol lib_LDAP.userDistinguishedNameMarkers.
+  value: ${lib_LDAP.userDistinguishedNameMarkers=}
+↓includeRDN [variables.RequestableVariable-1774272301112]: 
+  comment: Set to true to expose parsed RDN components for each directory entry
+  value: false
+↓pageSize [variables.RequestableVariable-1776185313173]: 
+  comment: Number of directory users requested per export page. Use a value greater than 0. Default 500.
+  value: 500.0
+↓countLimit [variables.RequestableVariable-1774272301114]: 
+  comment: Maximum number of directory users to synchronize across all pages. Use 0 for no limit.
+  value: 0
+↓timeLimit [variables.RequestableVariable-1774272301116]: 
+  comment: LDAP time limit passed to the search. Use 0 for no limit.
+  value: 0
+↓bulkMergeRules [variables.RequestableVariable-1774272301118]: 
+  comment: Merge rules applied when upserting Forms user documents
+  value: '{"mail": "override", "displayName": "override"}'
+↓formsGroupPrefix [variables.RequestableVariable-1774272301120]: 
+  comment: Prefix used to build the reserved Forms group identifier for each synchronized user
+  value: C8Oreserved_
+↓formsProvider [variables.RequestableVariable-1774272301122]: 
+  comment: Provider value written in synchronized Forms user documents
+  value: ad
+↓formsLanguage [variables.RequestableVariable-1774272301124]: 
+  comment: Language value written in synchronized Forms user documents
+  value: fr
+↓formsFavorites [variables.RequestableVariable-1774272301126]: 
+  comment: Favorites value written in synchronized Forms user documents
+↓formsPublishedFirst [variables.RequestableVariable-1774272301128]: 
+  comment: published_First value written in synchronized Forms user documents
+  value: true
+↓formsEditingRights [variables.RequestableVariable-1774272301130]: 
+  comment: editing_rights value written in synchronized Forms user documents
+  value: true
+↓clearCacheAfterSync [variables.RequestableVariable-1774272301132]: 
+  comment: Set to true to clear Convertigo cache entries after the Forms synchronization
+  value: true
+↓dryRun [variables.RequestableVariable-1774272301134]: 
+  comment: Set to true to prepare the Forms payloads without writing to FullSync databases
+  value: false
+↓userReturnedAttributes [variables.RequestableMultiValuedVariable-1774272301136]: 
+  value: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: distinguishedName
+        - java.lang.String: 
+          - ↑value: cn
+        - java.lang.String: 
+          - ↑value: sAMAccountName
+        - java.lang.String: 
+          - ↑value: uid
+        - java.lang.String: 
+          - ↑value: displayName
+        - java.lang.String: 
+          - ↑value: givenName
+        - java.lang.String: 
+          - ↑value: sn
+        - java.lang.String: 
+          - ↑value: mail
