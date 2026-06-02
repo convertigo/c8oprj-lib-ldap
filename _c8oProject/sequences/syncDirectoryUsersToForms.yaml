@@ -4,106 +4,255 @@ responseTimeout: 600
 ↓Input_variables [steps.InputVariablesStep-1774272301000]: 
 ↓Init_Pagination [steps.SimpleStep-1776185313071]: 
   expression: |
-    'var normalizeOptionalText = function(value) {
-    	if (value === undefined || value === null) {
-    		return "";
-    	}
-    	return ("" + value).replace(/^\s+|\s+$/g, "");
-    };
+    'var Context = javax.naming.Context;
+    var SearchControls = javax.naming.directory.SearchControls;
+    var InitialLdapContext = javax.naming.ldap.InitialLdapContext;
     
+    var normalizeOptionalText = function(value) {
+        if (value === undefined || value === null) {
+            return "";
+        }
+        return ("" + value).replace(/^\s+|\s+$/g, "");
+    };
     var parseBoolean = function(value, defaultValue) {
-    	var normalized = normalizeOptionalText(value).toLowerCase();
-    	if (normalized === "true" || normalized === "1" || normalized === "yes") {
-    		return true;
-    	}
-    	if (normalized === "false" || normalized === "0" || normalized === "no") {
-    		return false;
-    	}
-    	return defaultValue;
+        var normalized = normalizeOptionalText(value).toLowerCase();
+        if (normalized === "true" || normalized === "1" || normalized === "yes") {
+            return true;
+        }
+        if (normalized === "false" || normalized === "0" || normalized === "no") {
+            return false;
+        }
+        return defaultValue;
     };
-    
     var parseInteger = function(value, defaultValue) {
-    	var normalized = normalizeOptionalText(value);
-    	if (normalized === "") {
-    		return defaultValue;
-    	}
-    	try {
-    		return java.lang.Integer.parseInt(normalized);
-    	}
-    	catch (e) {
-    		return defaultValue;
-    	}
+        var normalized = normalizeOptionalText(value);
+        if (normalized === "") {
+            return defaultValue;
+        }
+        try {
+            return java.lang.Integer.parseInt(normalized);
+        }
+        catch (e) {
+            return defaultValue;
+        }
     };
-    
     var splitStringValues = function(value) {
-    	var normalized = normalizeOptionalText(value);
-    	if (normalized === "") {
-    		return [];
-    	}
-    	var chunks = normalized.replace(/\r/g, "\n").replace(/,/g, "\n").replace(/;/g, "\n").split("\n");
-    	var values = [];
-    	for (var i = 0; i < chunks.length; i++) {
-    		var chunk = normalizeOptionalText(chunks[i]);
-    		if (chunk !== "") {
-    			values.push(chunk);
-    		}
-    	}
-    	return values;
+        var normalized = normalizeOptionalText(value);
+        if (normalized === "") {
+            return [];
+        }
+        var chunks = normalized.replace(/\r/g, "\n").replace(/,/g, "\n").replace(/;/g, "\n").split("\n");
+        var values = [];
+        for (var i = 0; i < chunks.length; i++) {
+            var chunk = normalizeOptionalText(chunks[i]);
+            if (chunk !== "") {
+                values.push(chunk);
+            }
+        }
+        return values;
     };
-    
     var containsAnyMarker = function(value, markers) {
-    	if (markers.length === 0) {
-    		return true;
-    	}
-    	var normalized = normalizeOptionalText(value);
-    	if (normalized === "") {
-    		return false;
-    	}
-    	for (var i = 0; i < markers.length; i++) {
-    		if (normalized.indexOf(markers[i]) !== -1) {
-    			return true;
-    		}
-    	}
-    	return false;
+        if (markers.length === 0) {
+            return true;
+        }
+        var normalized = normalizeOptionalText(value);
+        if (normalized === "") {
+            return false;
+        }
+        for (var i = 0; i < markers.length; i++) {
+            if (normalized.indexOf(markers[i]) !== -1) {
+                return true;
+            }
+        }
+        return false;
     };
-    
+    var isLdapFilter = function(value) {
+        var filter = normalizeOptionalText(value);
+        return filter.length >= 3 && filter.charAt(0) === "(" && filter.charAt(filter.length - 1) === ")";
+    };
+    var uniqueStringValues = function(values) {
+        var result = [];
+        var seen = {};
+        for (var i = 0; i < values.length; i++) {
+            var value = normalizeOptionalText(values[i]);
+            if (value !== "" && !seen[value]) {
+                seen[value] = true;
+                result.push(value);
+            }
+        }
+        return result;
+    };
+    var escapeLdapFilterValue = function(value) {
+        var text = "" + value;
+        var result = "";
+        for (var i = 0; i < text.length; i++) {
+            var c = text.charAt(i);
+            if (c === "\\") {
+                result += "\\5c";
+            }
+            else if (c === "*") {
+                result += "\\2a";
+            }
+            else if (c === "(") {
+                result += "\\28";
+            }
+            else if (c === ")") {
+                result += "\\29";
+            }
+            else if (text.charCodeAt(i) === 0) {
+                result += "\\00";
+            }
+            else {
+                result += c;
+            }
+        }
+        return result;
+    };
     var getFirstAttributeValue = function(entry, attributeName) {
-    	if (!entry || !entry.attributes || !entry.attributes[attributeName]) {
-    		return "";
-    	}
-    	var attributeValue = entry.attributes[attributeName];
-    	if (attributeValue instanceof Array) {
-    		return attributeValue.length > 0 ? normalizeOptionalText(attributeValue[0]) : "";
-    	}
-    	return normalizeOptionalText(attributeValue);
+        if (!entry || !entry.attributes || !entry.attributes[attributeName]) {
+            return "";
+        }
+        var attributeValue = entry.attributes[attributeName];
+        if (attributeValue instanceof Array) {
+            return attributeValue.length > 0 ? normalizeOptionalText(attributeValue[0]) : "";
+        }
+        return normalizeOptionalText(attributeValue);
     };
-    
+    var createStringArray = function(values) {
+        var javaArray = java.lang.reflect.Array.newInstance(java.lang.String, values.length);
+        for (var i = 0; i < values.length; i++) {
+            javaArray[i] = "" + values[i];
+        }
+        return javaArray;
+    };
+    var toAttributeValues = function(attribute) {
+        var values = [];
+        if (attribute === null || attribute === undefined) {
+            return values;
+        }
+        var allValues = attribute.getAll();
+        try {
+            while (allValues.hasMore()) {
+                var value = allValues.next();
+                if (value !== null && value !== undefined) {
+                    values.push("" + value);
+                }
+            }
+        }
+        finally {
+            if (allValues !== null) {
+                try {
+                    allValues.close();
+                }
+                catch (e) {
+                }
+            }
+        }
+        return values;
+    };
+    var firstAttributeValueFromAttributes = function(attributes, attributeNames) {
+        if (attributes === null || attributes === undefined) {
+            return "";
+        }
+        for (var i = 0; i < attributeNames.length; i++) {
+            var values = toAttributeValues(attributes.get(attributeNames[i]));
+            for (var j = 0; j < values.length; j++) {
+                var value = normalizeOptionalText(values[j]);
+                if (value !== "") {
+                    return value;
+                }
+            }
+        }
+        return "";
+    };
+    var getConnectionSettings = function(ldapUrl) {
+        var settings = { useSSL: false, host: "", port: 389, providerUrl: "" };
+        var input = normalizeOptionalText(ldapUrl);
+        if (input.indexOf("://") === -1) {
+            input = "ldap://" + input;
+        }
+        try {
+            var normalizedUrl = input.replace("ldaps://", "https://").replace("ldap://", "http://");
+            var parsedUrl = new java.net.URL(normalizedUrl);
+            settings.useSSL = input.indexOf("ldaps://") === 0;
+            settings.host = parsedUrl.getHost();
+            settings.port = parsedUrl.getPort() > 0 ? parsedUrl.getPort() : (settings.useSSL ? 636 : 389);
+            settings.providerUrl = "ldap://" + settings.host + ":" + settings.port;
+        }
+        catch (e) {
+            log.error("Unable to parse ldapServer \"" + ldapUrl + "\" : " + e);
+        }
+        return settings;
+    };
+    var createLdapContext = function(ldapUrl, login, password) {
+        var settings = getConnectionSettings(ldapUrl);
+        var env = new java.util.Hashtable();
+        env.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.ldap.LdapCtxFactory");
+        env.put(Context.PROVIDER_URL, settings.providerUrl);
+        if (settings.useSSL) {
+            env.put(Context.SECURITY_PROTOCOL, "ssl");
+        }
+        if (normalizeOptionalText(login) === "") {
+            env.put(Context.SECURITY_AUTHENTICATION, "none");
+        }
+        else {
+            env.put(Context.SECURITY_AUTHENTICATION, "simple");
+            env.put(Context.SECURITY_PRINCIPAL, "" + login);
+            env.put(Context.SECURITY_CREDENTIALS, password === null || password === undefined ? "" : "" + password);
+        }
+        return new InitialLdapContext(env, null);
+    };
+    var isSizeLimitExceeded = function(error) {
+        return error instanceof javax.naming.SizeLimitExceededException || (error !== null && error.javaException !== null && error.javaException instanceof javax.naming.SizeLimitExceededException) || ("" + error).indexOf("SizeLimitExceededException") !== -1;
+    };
+    var isPartialResult = function(error) {
+        return error instanceof javax.naming.PartialResultException || (error !== null && error.javaException !== null && error.javaException instanceof javax.naming.PartialResultException) || ("" + error).indexOf("PartialResultException") !== -1;
+    };
+    var getNextSearchResult = function(searchResults, label) {
+        try {
+            if (!searchResults.hasMore()) {
+                return null;
+            }
+            return searchResults.next();
+        }
+        catch (e) {
+            if (isSizeLimitExceeded(e)) {
+                log.warn("LDAP search stopped after size limit was reached for " + label + ": " + e);
+                return null;
+            }
+            if (isPartialResult(e)) {
+                log.warn("LDAP search stopped after continuation references were returned for " + label + ": " + e);
+                return null;
+            }
+            throw e;
+        }
+    };
     var buildDisplayName = function(entry) {
-    	var givenNameValue = normalizeOptionalText(entry ? entry.givenName : "");
-    	if (givenNameValue === "") {
-    		givenNameValue = getFirstAttributeValue(entry, "givenName");
-    	}
-    	var surnameValue = normalizeOptionalText(entry ? entry.sn : "");
-    	if (surnameValue === "") {
-    		surnameValue = getFirstAttributeValue(entry, "sn");
-    	}
-    	if (givenNameValue !== "" && surnameValue !== "") {
-    		return givenNameValue.charAt(0).toUpperCase() + givenNameValue.substring(1).toLowerCase() + " " + surnameValue.toUpperCase();
-    	}
-    	return "";
+        var givenNameValue = normalizeOptionalText(entry ? entry.givenName : "");
+        if (givenNameValue === "") {
+            givenNameValue = getFirstAttributeValue(entry, "givenName");
+        }
+        var surnameValue = normalizeOptionalText(entry ? entry.sn : "");
+        if (surnameValue === "") {
+            surnameValue = getFirstAttributeValue(entry, "sn");
+        }
+        if (givenNameValue !== "" && surnameValue !== "") {
+            return givenNameValue.charAt(0).toUpperCase() + givenNameValue.substring(1).toLowerCase() + " " + surnameValue.toUpperCase();
+        }
+        return "";
     };
     
     var formsGroupPrefixValue = normalizeOptionalText(formsGroupPrefix);
     if (formsGroupPrefixValue === "") {
-    	formsGroupPrefixValue = "C8Oreserved_";
+        formsGroupPrefixValue = "C8Oreserved_";
     }
     var formsProviderValue = normalizeOptionalText(formsProvider);
     if (formsProviderValue === "") {
-    	formsProviderValue = "ad";
+        formsProviderValue = "ad";
     }
     var formsLanguageValue = normalizeOptionalText(formsLanguage);
     if (formsLanguageValue === "") {
-    	formsLanguageValue = "fr";
+        formsLanguageValue = "fr";
     }
     var formsFavoritesValue = normalizeOptionalText(formsFavorites);
     var formsPublishedFirstValue = parseBoolean(formsPublishedFirst, true);
@@ -112,19 +261,102 @@ responseTimeout: 600
     var clearCacheAfterSyncValue = parseBoolean(clearCacheAfterSync, true);
     var bulkMergeRulesValue = normalizeOptionalText(bulkMergeRules);
     if (bulkMergeRulesValue === "" || bulkMergeRulesValue === "[object Object]") {
-    	bulkMergeRulesValue = "{\"mail\": \"override\", \"displayName\": \"override\"}";
+        bulkMergeRulesValue = "{\"mail\": \"override\", \"displayName\": \"override\"}";
     }
     var userDistinguishedNameMarkersValue = splitStringValues(userDistinguishedNameMarkers);
     
+    var includeDirectoryGroupsValue = parseBoolean(includeDirectoryGroups, false);
+    var groupsBasePathValue = normalizeOptionalText(groupsBasePath);
+    if (groupsBasePathValue === "") {
+        groupsBasePathValue = normalizeOptionalText(ldapBasePath);
+    }
+    var groupObjectClassValue = normalizeOptionalText(groupObjectClass);
+    if (groupObjectClassValue === "") {
+        groupObjectClassValue = "group";
+    }
+    var groupSearchFilterValue = normalizeOptionalText(groupSearchFilter);
+    if (!isLdapFilter(groupSearchFilterValue)) {
+        groupSearchFilterValue = "(objectClass=" + escapeLdapFilterValue(groupObjectClassValue) + ")";
+    }
+    var groupMemberAttributeValue = normalizeOptionalText(groupMemberAttribute);
+    if (groupMemberAttributeValue === "") {
+        groupMemberAttributeValue = "uniqueMember";
+    }
+    var groupDisplayAttributeNames = splitStringValues(groupDisplayAttributes);
+    if (groupDisplayAttributeNames.length === 0) {
+        groupDisplayAttributeNames = ["cn"];
+    }
+    var formsDirectoryGroupPrefixValue = normalizeOptionalText(formsDirectoryGroupPrefix);
+    if (formsDirectoryGroupPrefixValue === "") {
+        formsDirectoryGroupPrefixValue = "ad:";
+    }
+    var groupLookupCountLimitValue = parseInteger(groupLookupCountLimit, 0);
+    var groupLookupTimeLimitValue = parseInteger(groupLookupTimeLimit, 0);
+    var totalPreparedDirectoryGroupsCount = 0;
+    var totalPreparedGroupMappingsCount = 0;
+    var pagePreparedDirectoryGroupsCount = 0;
+    var pagePreparedGroupMappingsCount = 0;
+    
+    var readDirectoryGroupsForUser = function(userDn) {
+        var groups = [];
+        var normalizedUserDn = normalizeOptionalText(userDn);
+        if (!includeDirectoryGroupsValue || normalizedUserDn === "" || groupMemberAttributeValue === "") {
+            return groups;
+        }
+        var ldapContext = null;
+        var searchResults = null;
+        try {
+            ldapContext = createLdapContext(ldapServer, adminUser, adminPassword);
+            var searchControls = new SearchControls();
+            searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
+            searchControls.setReturningAttributes(createStringArray(groupDisplayAttributeNames));
+            searchControls.setTimeLimit(groupLookupTimeLimitValue > 0 ? groupLookupTimeLimitValue : 0);
+            searchControls.setCountLimit(groupLookupCountLimitValue > 0 ? groupLookupCountLimitValue : 0);
+            var membershipFilter = "(" + groupMemberAttributeValue + "=" + escapeLdapFilterValue(normalizedUserDn) + ")";
+            var filter = "(&" + groupSearchFilterValue + membershipFilter + ")";
+            searchResults = ldapContext.search(groupsBasePathValue, filter, searchControls);
+            while (true) {
+                var searchResult = getNextSearchResult(searchResults, "directory groups");
+                if (searchResult === null) {
+                    break;
+                }
+                var groupName = firstAttributeValueFromAttributes(searchResult.getAttributes(), groupDisplayAttributeNames);
+                if (groupName !== "") {
+                    groups.push(formsDirectoryGroupPrefixValue + groupName);
+                }
+            }
+        }
+        catch (e) {
+            log.warn("Unable to lookup LDAP groups for user DN \"" + normalizedUserDn + "\" : " + e);
+        }
+        finally {
+            if (searchResults !== null) {
+                try {
+                    searchResults.close();
+                }
+                catch (e1) {
+                }
+            }
+            if (ldapContext !== null) {
+                try {
+                    ldapContext.close();
+                }
+                catch (e2) {
+                }
+            }
+        }
+        return uniqueStringValues(groups);
+    };
+    
     var requestedPageSizeValue = parseInteger(pageSize, 500);
     if (requestedPageSizeValue <= 0) {
-    	requestedPageSizeValue = 500;
+        requestedPageSizeValue = 500;
     }
     var configuredCountLimitValue = parseInteger(countLimit, 0);
     var remainingUsersLimit = configuredCountLimitValue > 0 ? configuredCountLimitValue : -1;
     var currentUserPageSize = requestedPageSizeValue;
     if (remainingUsersLimit > 0 && currentUserPageSize > remainingUsersLimit) {
-    	currentUserPageSize = remainingUsersLimit;
+        currentUserPageSize = remainingUsersLimit;
     }
     
     var currentUserPageCookie = "";
@@ -151,6 +383,8 @@ responseTimeout: 600
     var skippedUsersJSON = "[]";
     var syncSummaryJSON = "{}";
     var syncSummary = {};'
+↓Force_Directory_Groups [steps.SimpleStep-1780072246809]: 
+  expression: includeDirectoryGroupsValue = true;
 ↓Bulk_Merge_Rules_JSON [steps.ElementStep-1774272301036]: 
   expression: bulkMergeRulesValue
   nodeName: bulkMergeRulesJSONSTR
@@ -329,90 +563,123 @@ responseTimeout: 600
     expression: |
       'var users = [];
       try {
-      	users = directoryUsersJson !== undefined && directoryUsersJson !== null && normalizeOptionalText(directoryUsersJson) !== "" ? JSON.parse("" + directoryUsersJson) : [];
+          users = directoryUsersJson !== undefined && directoryUsersJson !== null && normalizeOptionalText(directoryUsersJson) !== "" ? JSON.parse("" + directoryUsersJson) : [];
       }
       catch (e) {
-      	users = [];
+          users = [];
       }
-      
+      var normalizeAttributeNames = function(value, fallbackValues) {
+          var values = splitStringValues(value);
+          if (values.length === 0) {
+              return fallbackValues.slice(0);
+          }
+          return values;
+      };
+      var getDirectEntryValue = function(entry, attributeName) {
+          var normalizedAttributeName = normalizeOptionalText(attributeName);
+          if (!entry || normalizedAttributeName === "") {
+              return "";
+          }
+          var directValue = entry[normalizedAttributeName];
+          if (directValue === undefined || directValue === null) {
+              return "";
+          }
+          return normalizeOptionalText(directValue);
+      };
+      var getFirstEntryValue = function(entry, attributeNames) {
+          for (var i = 0; i < attributeNames.length; i++) {
+              var attributeName = attributeNames[i];
+              var directValue = getDirectEntryValue(entry, attributeName);
+              if (directValue !== "") {
+                  return directValue;
+              }
+              var attributeValue = getFirstAttributeValue(entry, attributeName);
+              if (attributeValue !== "") {
+                  return attributeValue;
+              }
+          }
+          return "";
+      };
+      var buildConfiguredDisplayName = function(entry, givenNameAttributeNames, surnameAttributeNames) {
+          var givenNameValue = getFirstEntryValue(entry, givenNameAttributeNames);
+          var surnameValue = getFirstEntryValue(entry, surnameAttributeNames);
+          if (givenNameValue !== "" && surnameValue !== "") {
+              return givenNameValue.charAt(0).toUpperCase() + givenNameValue.substring(1).toLowerCase() + " " + surnameValue.toUpperCase();
+          }
+          return "";
+      };
+      var accountNameAttributeNames = normalizeAttributeNames(userAccountNameAttributes, ["accountName", "sAMAccountName", "uid", "cn"]);
+      var mailAttributeNames = normalizeAttributeNames(userMailAttributes, ["mail"]);
+      var displayNameAttributeNames = normalizeAttributeNames(userDisplayNameAttributes, ["displayName", "commonName", "cn", "uid", "sAMAccountName", "accountName"]);
+      var givenNameAttributeNames = normalizeAttributeNames(userGivenNameAttributes, ["givenName"]);
+      var surnameAttributeNames = normalizeAttributeNames(userSurnameAttributes, ["sn"]);
       var userDocuments = [];
       groupMappings = [];
       pageSkippedUsersCount = 0;
       pageFilteredOutUsersCount = 0;
-      
+      pagePreparedDirectoryGroupsCount = 0;
+      pagePreparedGroupMappingsCount = 0;
       for (var i = 0; i < users.length; i++) {
-      	var entry = users[i] || {};
-      	var distinguishedNameValue = normalizeOptionalText(entry.distinguishedName);
-      	if (distinguishedNameValue === "") {
-      		distinguishedNameValue = getFirstAttributeValue(entry, "distinguishedName");
-      	}
-      	if (!containsAnyMarker(distinguishedNameValue, userDistinguishedNameMarkersValue)) {
-      		pageFilteredOutUsersCount++;
-      		continue;
-      	}
-      	var accountName = normalizeOptionalText(entry.accountName);
-      	if (accountName === "") {
-      		accountName = getFirstAttributeValue(entry, "sAMAccountName");
-      	}
-      	if (accountName === "") {
-      		accountName = getFirstAttributeValue(entry, "uid");
-      	}
-      	if (accountName === "") {
-      		pageSkippedUsersCount++;
-      		continue;
-      	}
-      
-      	var groupName = formsGroupPrefixValue + accountName;
-      	var mailValue = normalizeOptionalText(entry.mail);
-      	if (mailValue === "") {
-      		mailValue = getFirstAttributeValue(entry, "mail");
-      	}
-      	var displayNameValue = normalizeOptionalText(entry.displayName);
-      	if (displayNameValue === "") {
-      		displayNameValue = getFirstAttributeValue(entry, "displayName");
-      	}
-      	if (displayNameValue === "") {
-      		displayNameValue = buildDisplayName(entry);
-      	}
-      	if (displayNameValue === "") {
-      		displayNameValue = normalizeOptionalText(entry.commonName);
-      	}
-      	if (displayNameValue === "") {
-      		displayNameValue = getFirstAttributeValue(entry, "cn");
-      	}
-      	if (displayNameValue === "") {
-      		displayNameValue = accountName;
-      	}
-      
-      	userDocuments.push({
-      		_id: groupName,
-      		_c8oAcl: accountName,
-      		favorites: formsFavoritesValue,
-      		published_First: "" + formsPublishedFirstValue,
-      		language: formsLanguageValue,
-      		provider: formsProviderValue,
-      		mail: mailValue,
-      		editing_rights: "" + formsEditingRightsValue,
-      		displayName: displayNameValue,
-      		c8o_view_type_users: true
-      	});
-      
-      	groupMappings.push({
-      		user: accountName,
-      		group: groupName
-      	});
+          var entry = users[i] || {};
+          var distinguishedNameValue = normalizeOptionalText(entry.distinguishedName);
+          if (distinguishedNameValue === "") {
+              distinguishedNameValue = getFirstAttributeValue(entry, "distinguishedName");
+          }
+          if (!containsAnyMarker(distinguishedNameValue, userDistinguishedNameMarkersValue)) {
+              pageFilteredOutUsersCount++;
+              continue;
+          }
+          var accountName = getFirstEntryValue(entry, accountNameAttributeNames);
+          if (accountName === "") {
+              pageSkippedUsersCount++;
+              continue;
+          }
+          var groupName = formsGroupPrefixValue + accountName;
+          var mailValue = getFirstEntryValue(entry, mailAttributeNames);
+          var displayNameValue = buildConfiguredDisplayName(entry, givenNameAttributeNames, surnameAttributeNames);
+          if (displayNameValue === "") {
+              displayNameValue = getFirstEntryValue(entry, displayNameAttributeNames);
+          }
+          if (displayNameValue === "") {
+              displayNameValue = accountName;
+          }
+          userDocuments.push({
+              _id: groupName,
+              _c8oAcl: accountName,
+              favorites: formsFavoritesValue,
+              published_First: "" + formsPublishedFirstValue,
+              language: formsLanguageValue,
+              provider: formsProviderValue,
+              mail: mailValue,
+              editing_rights: "" + formsEditingRightsValue,
+              displayName: displayNameValue,
+              c8o_view_type_users: true
+          });
+          groupMappings.push({
+              user: accountName,
+              group: groupName
+          });
+          var directoryGroups = readDirectoryGroupsForUser(distinguishedNameValue);
+          for (var groupIndex = 0; groupIndex < directoryGroups.length; groupIndex++) {
+              groupMappings.push({
+                  user: accountName,
+                  group: directoryGroups[groupIndex]
+              });
+              pagePreparedDirectoryGroupsCount++;
+          }
       }
-      
       pageUsersFromDirectoryCount = users.length;
       pagePreparedUserDocumentsCount = userDocuments.length;
-      pagePreparedReservedGroupsCount = groupMappings.length;
+      pagePreparedReservedGroupsCount = userDocuments.length;
+      pagePreparedGroupMappingsCount = groupMappings.length;
       shouldWriteCurrentPageToForms = dryRunValue !== true && userDocuments.length > 0;
       shouldSyncCurrentPageReservedGroups = dryRunValue !== true && groupMappings.length > 0;
       formsDocumentsJSON = JSON.stringify(userDocuments);
-      
       totalUsersFromDirectoryCount += pageUsersFromDirectoryCount;
       totalPreparedUserDocumentsCount += pagePreparedUserDocumentsCount;
       totalPreparedReservedGroupsCount += pagePreparedReservedGroupsCount;
+      totalPreparedDirectoryGroupsCount += pagePreparedDirectoryGroupsCount;
+      totalPreparedGroupMappingsCount += pagePreparedGroupMappingsCount;
       totalSkippedUsersCount += pageSkippedUsersCount;
       totalFilteredOutUsersCount += pageFilteredOutUsersCount;
       shouldWriteToFormsAny = shouldWriteToFormsAny || shouldWriteCurrentPageToForms;
@@ -521,20 +788,28 @@ responseTimeout: 600
     'shouldClearCache = dryRunValue !== true && clearCacheAfterSyncValue === true && (shouldWriteToFormsAny || shouldSyncReservedGroupsAny);
     skippedUsersJSON = "[]";
     syncSummary = {
-    	dryRun: dryRunValue,
-    	formsGroupPrefix: formsGroupPrefixValue,
-    	formsProvider: formsProviderValue,
-    	formsLanguage: formsLanguageValue,
-    	pageSize: requestedPageSizeValue,
-    	processedPagesCount: totalProcessedPages,
-    	usersFromDirectoryCount: totalUsersFromDirectoryCount,
-    	preparedUserDocumentsCount: totalPreparedUserDocumentsCount,
-    	preparedReservedGroupsCount: totalPreparedReservedGroupsCount,
-    	skippedUsersCount: totalSkippedUsersCount,
-    	filteredOutUsersCount: totalFilteredOutUsersCount,
-    	shouldWriteToForms: shouldWriteToFormsAny,
-    	shouldSyncReservedGroups: shouldSyncReservedGroupsAny,
-    	shouldClearCache: shouldClearCache
+        dryRun: dryRunValue,
+        formsGroupPrefix: formsGroupPrefixValue,
+        formsProvider: formsProviderValue,
+        formsLanguage: formsLanguageValue,
+        includeDirectoryGroups: includeDirectoryGroupsValue,
+        groupsBasePath: groupsBasePathValue,
+        groupSearchFilter: groupSearchFilterValue,
+        groupMemberAttribute: groupMemberAttributeValue,
+        groupDisplayAttributes: groupDisplayAttributeNames.join(","),
+        formsDirectoryGroupPrefix: formsDirectoryGroupPrefixValue,
+        pageSize: requestedPageSizeValue,
+        processedPagesCount: totalProcessedPages,
+        usersFromDirectoryCount: totalUsersFromDirectoryCount,
+        preparedUserDocumentsCount: totalPreparedUserDocumentsCount,
+        preparedReservedGroupsCount: totalPreparedReservedGroupsCount,
+        preparedDirectoryGroupsCount: totalPreparedDirectoryGroupsCount,
+        preparedGroupMappingsCount: totalPreparedGroupMappingsCount,
+        skippedUsersCount: totalSkippedUsersCount,
+        filteredOutUsersCount: totalFilteredOutUsersCount,
+        shouldWriteToForms: shouldWriteToFormsAny,
+        shouldSyncReservedGroups: shouldSyncReservedGroupsAny,
+        shouldClearCache: shouldClearCache
     };
     syncSummaryJSON = JSON.stringify(syncSummary);'
 ↓Skipped_Users_JSON [steps.ElementStep-1774272301038]: 
@@ -587,24 +862,48 @@ responseTimeout: 600
   ↓processedPagesCount [steps.ElementStep-1776185313245]: 
     expression: syncSummary.processedPagesCount
     nodeName: processedPagesCount
+  ↓includeDirectoryGroups [steps.ElementStep-1780071843986]: 
+    expression: syncSummary.includeDirectoryGroups
+    nodeName: includeDirectoryGroups
+  ↓groupsBasePath [steps.ElementStep-1780071844011]: 
+    expression: syncSummary.groupsBasePath
+    nodeName: groupsBasePath
+  ↓groupSearchFilter [steps.ElementStep-1780071844034]: 
+    expression: syncSummary.groupSearchFilter
+    nodeName: groupSearchFilter
+  ↓groupMemberAttribute [steps.ElementStep-1780071844061]: 
+    expression: syncSummary.groupMemberAttribute
+    nodeName: groupMemberAttribute
+  ↓groupDisplayAttributes [steps.ElementStep-1780071844082]: 
+    expression: syncSummary.groupDisplayAttributes
+    nodeName: groupDisplayAttributes
+  ↓formsDirectoryGroupPrefix [steps.ElementStep-1780071844101]: 
+    expression: syncSummary.formsDirectoryGroupPrefix
+    nodeName: formsDirectoryGroupPrefix
+  ↓preparedDirectoryGroupsCount [steps.ElementStep-1780071844130]: 
+    expression: syncSummary.preparedDirectoryGroupsCount
+    nodeName: preparedDirectoryGroupsCount
+  ↓preparedGroupMappingsCount [steps.ElementStep-1780071844157]: 
+    expression: syncSummary.preparedGroupMappingsCount
+    nodeName: preparedGroupMappingsCount
 ↓If_Clear_Cache [steps.IfStep-1774272301094]: 
   condition: shouldClearCache
   ↓clearCacheEntries [steps.SimpleStep-1774272301096]: 
     expression: com.twinsoft.convertigo.engine.Engine.theApp.cacheManager.clearCacheEntries();
 ↓adminUser [variables.RequestableVariable-1774272301098]: 
   comment: LDAP or Active Directory account used to bind and execute the searches
-  value: ${lib_LDAP.adminUser}
+  value: ${lib_UserManager.adminUser}
 ↓ldapServer [variables.RequestableVariable-1774272301100]: 
   comment: LDAP server URL in the form ldap(s)://server:port
-  value: ${lib_LDAP.ldapServer}
+  value: ${lib_UserManager.ldapServer}
 ↓ldapBasePath [variables.RequestableVariable-1774272301102]: 
   comment: Default LDAP base DN used when usersBasePath is not provided
-  value: ${lib_LDAP.ldapBasePath}
+  value: ${lib_UserManager.ldapBasePath}
 ↓adminPassword [variables.RequestableVariable-1774272301104]: 
   value: 
     - ↑ciphered: true
     - ↑traceable: false
-    - →→: x9660edbcfb70b9132871bb20141d4fcf9dc7a751c8e24fc8670f1c6f82ed6763b1595e619e070cbfb519937aa69faed9
+    - →→: x530464aa1e63d0f98506f75047888822cd14101585f94218a48f6594c8d671cc5363d6aa941b84b949231422a2651cd9
   visibility: '-1'
 ↓usersBasePath [variables.RequestableVariable-1774272301106]: 
   comment: Optional LDAP base DN dedicated to user extraction. Falls back to ldapBasePath when empty.
@@ -656,6 +955,7 @@ responseTimeout: 600
   comment: Set to true to prepare the Forms payloads without writing to FullSync databases
   value: false
 ↓userReturnedAttributes [variables.RequestableMultiValuedVariable-1774272301136]: 
+  comment: LDAP attributes returned for each user. Include every attribute referenced by userAccountNameAttributes, userMailAttributes, userDisplayNameAttributes, userGivenNameAttributes and userSurnameAttributes.
   value: 
     - xmlizable: 
       - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
@@ -676,3 +976,44 @@ responseTimeout: 600
           - ↑value: sn
         - java.lang.String: 
           - ↑value: mail
+↓userAccountNameAttributes [variables.RequestableVariable-1780065580569]: 
+  comment: Comma/newline-separated candidate attributes used to build the Forms login, reserved group id and ACL. Defaults to lib_UserManager.LDAP_USER_ID_ATTRIBUTE.
+  value: ${lib_UserManager.LDAP_USER_ID_ATTRIBUTE=uid}
+↓userMailAttributes [variables.RequestableVariable-1780065580652]: 
+  comment: Comma/newline-separated candidate attributes used to fill the Forms user mail field. Custom attributes must also be present in userReturnedAttributes.
+  value: ${lib_LDAP.userMailAttributes=mail}
+↓userDisplayNameAttributes [variables.RequestableVariable-1780065580674]: 
+  comment: Comma/newline-separated candidate attributes used as displayName fallback after a computed givenName/surname display name. Custom attributes must also be present in userReturnedAttributes.
+  value: ${lib_LDAP.userDisplayNameAttributes=displayName,commonName,cn,uid,sAMAccountName,accountName}
+↓userGivenNameAttributes [variables.RequestableVariable-1780065580703]: 
+  comment: Comma/newline-separated candidate attributes used as first name for the computed Forms displayName. Custom attributes must also be present in userReturnedAttributes.
+  value: ${lib_LDAP.userGivenNameAttributes=givenName}
+↓userSurnameAttributes [variables.RequestableVariable-1780065580725]: 
+  comment: Comma/newline-separated candidate attributes used as surname for the computed Forms displayName. Custom attributes must also be present in userReturnedAttributes.
+  value: ${lib_LDAP.userSurnameAttributes=sn}
+↓includeDirectoryGroups [variables.RequestableVariable-1780071693997]: 
+  comment: Directory group lookup is mandatory. This variable is kept for compatibility but is forced to true by the sequence.
+  value: true
+↓groupsBasePath [variables.RequestableVariable-1780071694048]: 
+  comment: LDAP base DN dedicated to group lookup. Uses the same symbol as lib_UserManager.
+  value: ${lib_UserManager.ldapBasePathGroup=}
+↓groupObjectClass [variables.RequestableVariable-1780071694073]: 
+  comment: LDAP objectClass value identifying directory groups. Uses the same symbol as lib_UserManager.
+  value: ${lib_UserManager.LDAP_GROUP_OBJECT_CLASS=group}
+↓groupSearchFilter [variables.RequestableVariable-1780071694096]: 
+  comment: Advanced override for the LDAP group filter. Leave empty to use lib_UserManager.LDAP_GROUP_OBJECT_CLASS.
+↓groupMemberAttribute [variables.RequestableVariable-1780071694206]: 
+  comment: LDAP group attribute that contains the user distinguishedName. lib_UserManager currently uses uniqueMember in its group lookup.
+  value: uniqueMember
+↓groupDisplayAttributes [variables.RequestableVariable-1780071694228]: 
+  comment: Comma/newline-separated group attributes used to build the Forms directory group name. Uses the same symbol as lib_UserManager.
+  value: ${lib_UserManager.LDAP_GROUP_DISPLAY_ATTRIBUTE=cn}
+↓formsDirectoryGroupPrefix [variables.RequestableVariable-1780071694251]: 
+  comment: Prefix added to LDAP directory group names before SetUserInGroupBulk. Same behavior as lib_UserManager group mappings.
+  value: ad:
+↓groupLookupCountLimit [variables.RequestableVariable-1780071694271]: 
+  comment: Maximum number of LDAP groups looked up per user. Use 0 for no limit.
+  value: 0
+↓groupLookupTimeLimit [variables.RequestableVariable-1780071694297]: 
+  comment: LDAP group lookup time limit per user in milliseconds. Use 0 for no limit.
+  value: 0
