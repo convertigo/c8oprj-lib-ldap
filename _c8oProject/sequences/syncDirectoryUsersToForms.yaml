@@ -811,6 +811,8 @@ responseTimeout: 600
         }'
   ↓If_Sync_Reserved_Groups [steps.IfStep-1776185313149]: 
     condition: shouldSyncCurrentPageReservedGroups
+    ↓Log_Group_Mappings_Payload [steps.SimpleStep-1780500000001]: 
+      expression: 'if (debugUserCreationLogsValue === true) { logUserSync("info", "groupMappings payload for page " + (totalProcessedPages + 1) + ": " + JSON.stringify(groupMappings)); }'
     ↓Reserved_Groups [steps.XMLComplexStep-1776185313151]: 
       nodeName: groups
       output: false
@@ -820,7 +822,6 @@ responseTimeout: 600
       ↓jIterator [steps.SimpleIteratorStep-1776185313155]: 
         expression: groupMappings
         ↓Complex [steps.XMLComplexStep-1776185313157]: 
-          nodeName: Complex
           ↓Attribute [steps.XMLAttributeStep-1776185313159]: 
             nodeName: type
             nodeText: object
@@ -846,36 +847,36 @@ responseTimeout: 600
       'totalProcessedPages++;
       usersHasMorePagesValue = parseBoolean(usersHasMorePagesRaw, false);
       if (remainingUsersLimit > 0) {
-      	remainingUsersLimit -= pageUsersFromDirectoryCount;
-      	if (remainingUsersLimit <= 0) {
-      		remainingUsersLimit = 0;
-      		usersHasMorePagesValue = false;
-      	}
+          remainingUsersLimit -= pageUsersFromDirectoryCount;
+          if (remainingUsersLimit <= 0) {
+              remainingUsersLimit = 0;
+              usersHasMorePagesValue = false;
+          }
       }
       
       if (usersHasMorePagesValue) {
-      	var normalizedNextCookie = normalizeOptionalText(nextUserPageCookieValue);
-      	if (normalizedNextCookie === "" || normalizedNextCookie === currentUserPageCookie) {
-      		if (normalizedNextCookie !== "" && normalizedNextCookie === currentUserPageCookie) {
-      			log.warn("Stopping LDAP sync pagination because the next user page cookie did not change.");
-      		}
-      		usersHasMorePagesValue = false;
-      		currentUserPageCookie = "";
-      	}
-      	else {
-      		currentUserPageCookie = normalizedNextCookie;
-      	}
+          var normalizedNextCookie = normalizeOptionalText(nextUserPageCookieValue);
+          if (normalizedNextCookie === "" || normalizedNextCookie === currentUserPageCookie) {
+              if (normalizedNextCookie !== "" && normalizedNextCookie === currentUserPageCookie) {
+                  log.warn("Stopping LDAP sync pagination because the next user page cookie did not change.");
+              }
+              usersHasMorePagesValue = false;
+              currentUserPageCookie = "";
+          }
+          else {
+              currentUserPageCookie = normalizedNextCookie;
+          }
       }
       else {
-      	currentUserPageCookie = "";
+          currentUserPageCookie = "";
       }
       
       currentUserPageSize = requestedPageSizeValue;
       if (remainingUsersLimit > 0 && currentUserPageSize > remainingUsersLimit) {
-      	currentUserPageSize = remainingUsersLimit;
+          currentUserPageSize = remainingUsersLimit;
       }
       if (currentUserPageSize <= 0) {
-      	usersHasMorePagesValue = false;
+          usersHasMorePagesValue = false;
       }
       groupMappings = [];
       formsDocumentsJSON = "[]";
