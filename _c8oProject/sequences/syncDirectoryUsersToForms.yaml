@@ -258,6 +258,7 @@ responseTimeout: 600
     var formsPublishedFirstValue = parseBoolean(formsPublishedFirst, true);
     var formsEditingRightsValue = parseBoolean(formsEditingRights, true);
     var dryRunValue = parseBoolean(dryRun, false);
+    var debugUserCreationLogsValue = parseBoolean(debugUserCreationLogs, false);
     var clearCacheAfterSyncValue = parseBoolean(clearCacheAfterSync, true);
     var bulkMergeRulesValue = normalizeOptionalText(bulkMergeRules);
     if (bulkMergeRulesValue === "" || bulkMergeRulesValue === "[object Object]") {
@@ -346,6 +347,21 @@ responseTimeout: 600
             }
         }
         return uniqueStringValues(groups);
+    };
+    var logUserSync = function(level, message) {
+        if (debugUserCreationLogsValue !== true) {
+            return;
+        }
+        var prefix = "[syncDirectoryUsersToForms] ";
+        if (level === "warn") {
+            log.warn(prefix + message);
+        }
+        else if (level === "error") {
+            log.error(prefix + message);
+        }
+        else {
+            log.info(prefix + message);
+        }
     };
     
     var requestedPageSizeValue = parseInteger(pageSize, 500);
@@ -613,12 +629,14 @@ responseTimeout: 600
       var displayNameAttributeNames = normalizeAttributeNames(userDisplayNameAttributes, ["displayName", "commonName", "cn", "uid", "sAMAccountName", "accountName"]);
       var givenNameAttributeNames = normalizeAttributeNames(userGivenNameAttributes, ["givenName"]);
       var surnameAttributeNames = normalizeAttributeNames(userSurnameAttributes, ["sn"]);
+      var currentPageIndex = totalProcessedPages + 1;
       var userDocuments = [];
       groupMappings = [];
       pageSkippedUsersCount = 0;
       pageFilteredOutUsersCount = 0;
       pagePreparedDirectoryGroupsCount = 0;
       pagePreparedGroupMappingsCount = 0;
+      logUserSync("info", "page " + currentPageIndex + " received " + users.length + " LDAP candidate user(s)");
       for (var i = 0; i < users.length; i++) {
           var entry = users[i] || {};
           var distinguishedNameValue = normalizeOptionalText(entry.distinguishedName);
@@ -627,11 +645,13 @@ responseTimeout: 600
           }
           if (!containsAnyMarker(distinguishedNameValue, userDistinguishedNameMarkersValue)) {
               pageFilteredOutUsersCount++;
+              logUserSync("info", "page " + currentPageIndex + " filtered out user DN=\"" + distinguishedNameValue + "\" because it does not match userDistinguishedNameMarkers");
               continue;
           }
           var accountName = getFirstEntryValue(entry, accountNameAttributeNames);
           if (accountName === "") {
               pageSkippedUsersCount++;
+              logUserSync("warn", "page " + currentPageIndex + " skipped user DN=\"" + distinguishedNameValue + "\" because no account identifier was found in [" + accountNameAttributeNames.join(",") + "]");
               continue;
           }
           var groupName = formsGroupPrefixValue + accountName;
@@ -655,11 +675,15 @@ responseTimeout: 600
               displayName: displayNameValue,
               c8o_view_type_users: true
           });
+          logUserSync("info", "page " + currentPageIndex + " prepared user doc _id=\"" + groupName + "\" acl=\"" + accountName + "\" displayName=\"" + displayNameValue + "\" mail=\"" + mailValue + "\" dn=\"" + distinguishedNameValue + "\"");
           groupMappings.push({
               user: accountName,
               group: groupName
           });
           var directoryGroups = readDirectoryGroupsForUser(distinguishedNameValue);
+          if (directoryGroups.length > 0) {
+              logUserSync("info", "page " + currentPageIndex + " prepared " + directoryGroups.length + " directory group mapping(s) for user \"" + accountName + "\" : " + directoryGroups.join(","));
+          }
           for (var groupIndex = 0; groupIndex < directoryGroups.length; groupIndex++) {
               groupMappings.push({
                   user: accountName,
@@ -683,7 +707,8 @@ responseTimeout: 600
       totalSkippedUsersCount += pageSkippedUsersCount;
       totalFilteredOutUsersCount += pageFilteredOutUsersCount;
       shouldWriteToFormsAny = shouldWriteToFormsAny || shouldWriteCurrentPageToForms;
-      shouldSyncReservedGroupsAny = shouldSyncReservedGroupsAny || shouldSyncCurrentPageReservedGroups;'
+      shouldSyncReservedGroupsAny = shouldSyncReservedGroupsAny || shouldSyncCurrentPageReservedGroups;
+      logUserSync("info", "page " + currentPageIndex + " summary: candidates=" + pageUsersFromDirectoryCount + ", preparedUserDocuments=" + pagePreparedUserDocumentsCount + ", preparedReservedGroups=" + pagePreparedReservedGroupsCount + ", preparedDirectoryGroups=" + pagePreparedDirectoryGroupsCount + ", preparedGroupMappings=" + pagePreparedGroupMappingsCount + ", skipped=" + pageSkippedUsersCount + ", filteredOut=" + pageFilteredOutUsersCount + ", shouldWriteToForms=" + shouldWriteCurrentPageToForms);'
   ↓Normalize_Case_Sensitive_Identifiers [steps.SimpleStep-1780406189268]: 
     expression: |
       'var caseSensitiveUserIdsValue = parseBoolean(casesensitive, true);
@@ -712,6 +737,7 @@ responseTimeout: 600
               }
               formsDocument._id = normalizeReservedGroupName(formsDocument._id);
               formsDocument._c8oAcl = normalizeFormsIdentifier(formsDocument._c8oAcl);
+              logUserSync("info", "normalized user doc identifiers to _id=\"" + formsDocument._id + "\" acl=\"" + formsDocument._c8oAcl + "\" because casesensitive=false");
           }
           formsDocumentsJSON = JSON.stringify(formsDocuments);
           for (var mappingIndex = 0; mappingIndex < groupMappings.length; mappingIndex++) {
@@ -750,6 +776,39 @@ responseTimeout: 600
                 - ↑value: 1774272301036
               - java.lang.String: 
                 - ↑value: ./text()
+    ↓Forms_Write_Response [steps.SourceStep-1780408773457]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1776185313143
+            - java.lang.String: 
+              - ↑value: ./document/couchdb_output
+      variableName: formsWriteResponseNodes
+    ↓Log_Forms_Write_Response [steps.SimpleStep-1780408773459]: 
+      expression: |
+        'if (debugUserCreationLogsValue === true) {
+            var responseJson = "{}";
+            try {
+                var responseNode = null;
+                if (formsWriteResponseNodes !== null && formsWriteResponseNodes !== undefined) {
+                    if (formsWriteResponseNodes.getLength !== undefined && formsWriteResponseNodes.getLength() > 0) {
+                        responseNode = formsWriteResponseNodes.item(0);
+                    }
+                    else if (formsWriteResponseNodes.length !== undefined && formsWriteResponseNodes.length > 0) {
+                        responseNode = formsWriteResponseNodes.item(0);
+                    }
+                }
+                if (responseNode !== null) {
+                    responseJson = "" + com.twinsoft.convertigo.engine.util.XMLUtils.XmlToJson(responseNode, true, true);
+                }
+            }
+            catch (e) {
+                responseJson = "{\"serializationError\":\"" + ("" + e).replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\"}";
+            }
+            logUserSync("info", "PostBulkDocuments response for page " + (totalProcessedPages + 1) + ": " + responseJson);
+        }'
   ↓If_Sync_Reserved_Groups [steps.IfStep-1776185313149]: 
     condition: shouldSyncCurrentPageReservedGroups
     ↓Reserved_Groups [steps.XMLComplexStep-1776185313151]: 
@@ -993,6 +1052,9 @@ responseTimeout: 600
 ↓dryRun [variables.RequestableVariable-1774272301134]: 
   comment: Set to true to prepare the Forms payloads without writing to FullSync databases
   value: false
+↓debugUserCreationLogs [variables.RequestableVariable-1780408773455]: 
+  comment: Set to true to log per-user preparation, lowercase normalization and PostBulkDocuments responses during the Forms synchronization
+  value: ${lib_LDAP.debugUserCreationLogs=false}
 ↓userReturnedAttributes [variables.RequestableMultiValuedVariable-1774272301136]: 
   comment: LDAP attributes returned for each user. Include every attribute referenced by userAccountNameAttributes, userMailAttributes, userDisplayNameAttributes, userGivenNameAttributes and userSurnameAttributes.
   value: 

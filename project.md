@@ -21,7 +21,7 @@ see [documentation](http://localhost:18080/convertigo/xsd/couchdb/CouchDb.xsd)
 ## ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/references/images/ProjectSchemaReference_16x16.png?raw=true "ProjectSchemaReference") lib_FullSyncGrp
 
 
-see [readme](https://github.com/convertigo/c8oprj-lib-fullsync-grp/tree/1363f51659be30b7a5d4a028c26ef7bcc4977430#readme)
+see [readme](https://github.com/convertigo/c8oprj-lib-fullsync-grp/tree/8.0.0#readme)
 </p></blockquote></details>
 </p></blockquote></details>
 
@@ -466,6 +466,14 @@ Merge rules applied when upserting Forms user documents
 </tr>
 <tr>
 <td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;casesensitive
+</td>
+<td>
+If false, Forms user identifiers and individual reserved groups are normalized to lowercase. LDAP learned group names are preserved.
+</td>
+</tr>
+<tr>
+<td>
 <img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;clearCacheAfterSync
 </td>
 <td>
@@ -478,6 +486,14 @@ Set to true to clear Convertigo cache entries after the Forms synchronization
 </td>
 <td>
 Maximum number of directory users to synchronize across all pages. Use 0 for no limit.
+</td>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;debugUserCreationLogs
+</td>
+<td>
+Set to true to log per-user preparation, lowercase normalization and PostBulkDocuments responses during the Forms synchronization
 </td>
 </tr>
 <tr>
