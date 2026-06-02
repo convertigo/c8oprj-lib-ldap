@@ -684,6 +684,45 @@ responseTimeout: 600
       totalFilteredOutUsersCount += pageFilteredOutUsersCount;
       shouldWriteToFormsAny = shouldWriteToFormsAny || shouldWriteCurrentPageToForms;
       shouldSyncReservedGroupsAny = shouldSyncReservedGroupsAny || shouldSyncCurrentPageReservedGroups;'
+  ↓Normalize_Case_Sensitive_Identifiers [steps.SimpleStep-1780406189268]: 
+    expression: |
+      'var caseSensitiveUserIdsValue = parseBoolean(casesensitive, true);
+      if (caseSensitiveUserIdsValue !== true) {
+          var normalizeFormsIdentifier = function(value) {
+              return normalizeOptionalText(value).toLowerCase();
+          };
+          var normalizeReservedGroupName = function(value) {
+              var groupValue = normalizeOptionalText(value);
+              if (groupValue.indexOf(formsGroupPrefixValue) === 0) {
+                  return formsGroupPrefixValue + groupValue.substring(formsGroupPrefixValue.length).toLowerCase();
+              }
+              return groupValue;
+          };
+          var formsDocuments = [];
+          try {
+              formsDocuments = formsDocumentsJSON !== undefined && formsDocumentsJSON !== null && normalizeOptionalText(formsDocumentsJSON) !== "" ? JSON.parse("" + formsDocumentsJSON) : [];
+          }
+          catch (e) {
+              formsDocuments = [];
+          }
+          for (var docIndex = 0; docIndex < formsDocuments.length; docIndex++) {
+              var formsDocument = formsDocuments[docIndex];
+              if (!formsDocument) {
+                  continue;
+              }
+              formsDocument._id = normalizeReservedGroupName(formsDocument._id);
+              formsDocument._c8oAcl = normalizeFormsIdentifier(formsDocument._c8oAcl);
+          }
+          formsDocumentsJSON = JSON.stringify(formsDocuments);
+          for (var mappingIndex = 0; mappingIndex < groupMappings.length; mappingIndex++) {
+              var groupMapping = groupMappings[mappingIndex];
+              if (!groupMapping) {
+                  continue;
+              }
+              groupMapping.user = normalizeFormsIdentifier(groupMapping.user);
+              groupMapping.group = normalizeReservedGroupName(groupMapping.group);
+          }
+      }'
   ↓Forms_Documents_JSON [steps.ElementStep-1776185313139]: 
     expression: formsDocumentsJSON
     nodeName: formsDocumentsJSONSTR
@@ -991,6 +1030,9 @@ responseTimeout: 600
 ↓userSurnameAttributes [variables.RequestableVariable-1780065580725]: 
   comment: Comma/newline-separated candidate attributes used as surname for the computed Forms displayName. Custom attributes must also be present in userReturnedAttributes.
   value: ${lib_LDAP.userSurnameAttributes=sn}
+↓casesensitive [variables.RequestableVariable-1780406174377]: 
+  comment: If false, Forms user identifiers and individual reserved groups are normalized to lowercase. LDAP learned group names are preserved.
+  value: ${C8Oforms.LDAP_AD_Casesentsitive=true}
 ↓includeDirectoryGroups [variables.RequestableVariable-1780071693997]: 
   comment: Directory group lookup is mandatory. This variable is kept for compatibility but is forced to true by the sequence.
   value: true
