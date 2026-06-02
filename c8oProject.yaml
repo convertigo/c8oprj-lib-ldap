@@ -1,7 +1,7 @@
 ↑convertigo: 8.0.0.m006
 ↓lib_LDAP [core.Project]: 
   comment: Mashup Sequencer project
-  version: 7.6.0.11
+  version: 7.6.0.12
   ↓c8oforms_fs [connectors.FullSyncConnector]: 🗏 connectors/c8oforms_fs.yaml
   ↓void [connectors.SqlConnector]: 🗏 connectors/void.yaml
   ↓exportDirectoryAccountsAndGroups [sequences.GenericSequence]: 🗏 sequences/exportDirectoryAccountsAndGroups.yaml
