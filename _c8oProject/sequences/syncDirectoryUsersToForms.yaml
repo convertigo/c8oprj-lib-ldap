@@ -396,6 +396,7 @@ responseTimeout: 600
     var pageSkippedUsersCount = 0;
     var pageFilteredOutUsersCount = 0;
     var formsDocumentsJSON = "[]";
+    var formsDocumentAcls = [];
     var skippedUsersJSON = "[]";
     var syncSummaryJSON = "{}";
     var syncSummary = {};'
@@ -631,6 +632,7 @@ responseTimeout: 600
       var surnameAttributeNames = normalizeAttributeNames(userSurnameAttributes, ["sn"]);
       var currentPageIndex = totalProcessedPages + 1;
       var userDocuments = [];
+      formsDocumentAcls = [];
       groupMappings = [];
       pageSkippedUsersCount = 0;
       pageFilteredOutUsersCount = 0;
@@ -665,7 +667,6 @@ responseTimeout: 600
           }
           userDocuments.push({
               _id: groupName,
-              _c8oAcl: accountName,
               favorites: formsFavoritesValue,
               published_First: "" + formsPublishedFirstValue,
               language: formsLanguageValue,
@@ -675,6 +676,7 @@ responseTimeout: 600
               displayName: displayNameValue,
               c8o_view_type_users: true
           });
+          formsDocumentAcls.push(accountName);
           logUserSync("info", "page " + currentPageIndex + " prepared user doc _id=\"" + groupName + "\" acl=\"" + accountName + "\" displayName=\"" + displayNameValue + "\" mail=\"" + mailValue + "\" dn=\"" + distinguishedNameValue + "\"");
           groupMappings.push({
               user: accountName,
@@ -736,8 +738,10 @@ responseTimeout: 600
                   continue;
               }
               formsDocument._id = normalizeReservedGroupName(formsDocument._id);
-              formsDocument._c8oAcl = normalizeFormsIdentifier(formsDocument._c8oAcl);
-              logUserSync("info", "normalized user doc identifiers to _id=\"" + formsDocument._id + "\" acl=\"" + formsDocument._c8oAcl + "\" because casesensitive=false");
+              if (docIndex < formsDocumentAcls.length) {
+                  formsDocumentAcls[docIndex] = normalizeFormsIdentifier(formsDocumentAcls[docIndex]);
+              }
+              logUserSync("info", "normalized user doc identifiers to _id=\"" + formsDocument._id + "\" acl=\"" + (docIndex < formsDocumentAcls.length ? formsDocumentAcls[docIndex] : "") + "\" because casesensitive=false");
           }
           formsDocumentsJSON = JSON.stringify(formsDocuments);
           for (var mappingIndex = 0; mappingIndex < groupMappings.length; mappingIndex++) {
@@ -753,6 +757,14 @@ responseTimeout: 600
     expression: formsDocumentsJSON
     nodeName: formsDocumentsJSONSTR
     output: false
+  ↓Forms_Document_Acls [steps.XMLComplexStep-1780411000001]: 
+    nodeName: formsDocumentAcls
+    output: false
+    ↓jIterator [steps.SimpleIteratorStep-1780411000003]: 
+      expression: formsDocumentAcls
+      ↓acl [steps.ElementStep-1780411000005]: 
+        expression: formsDocumentAcls[index]
+        nodeName: acl
   ↓If_Write_To_Forms [steps.IfStep-1776185313141]: 
     condition: shouldWriteCurrentPageToForms
     ↓Call_Transaction [steps.TransactionStep-1776185313143]: 
@@ -776,6 +788,15 @@ responseTimeout: 600
                 - ↑value: 1774272301036
               - java.lang.String: 
                 - ↑value: ./text()
+      ↓_c8oAcls [variables.StepMultiValuedVariable-1780411000007]: 
+        sourceDefinition: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+            - com.twinsoft.convertigo.beans.common.XMLVector: 
+              - java.lang.String: 
+                - ↑value: 1780411000001
+              - java.lang.String: 
+                - ↑value: ./acl/text()
     ↓Forms_Write_Response [steps.SourceStep-1780408773457]: 
       sourceDefinition: 
         - xmlizable: 
@@ -880,6 +901,7 @@ responseTimeout: 600
       }
       groupMappings = [];
       formsDocumentsJSON = "[]";
+      formsDocumentAcls = [];
       directoryUsersJson = "";
       shouldClearCache = dryRunValue !== true && clearCacheAfterSyncValue === true && (shouldWriteToFormsAny || shouldSyncReservedGroupsAny);'
 ↓Finalize_Summary [steps.SimpleStep-1776185313171]: 
