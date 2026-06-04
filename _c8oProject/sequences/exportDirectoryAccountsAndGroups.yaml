@@ -215,7 +215,7 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     var firstConfiguredSymbolValue = function (symbolNames) {
     	for (var i = 0; i < symbolNames.length; i++) {
     		try {
-    			var value = Engine.theApp.databaseObjectsManager.symbolsGetValue(symbolNames[i]);
+    			var value = com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue(symbolNames[i]);
     			value = normalizeOptionalText(value);
     			if (value !== "") {
     				return value;
@@ -553,79 +553,119 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     	return {
     		entries: [],
     		returnedCount: 0,
+    		processedPagesCount: 0,
     		nextPageCookie: "",
     		hasMorePages: false
     	};
     };
     
-    var searchEntries = function (entryType, searchBase, searchFilter, requestedAttributes, targetNode, includeRdn, emitEntriesXml, emitAttributesJson, collectResults, ldapUrl, searchLogin, searchPassword, timeLimit, countLimit, pageSize, pageCookie) {
+    var searchEntries = function (entryType, searchBase, searchFilter, requestedAttributes, targetNode, includeRdn, emitEntriesXml, emitAttributesJson, collectResults, ldapUrl, searchLogin, searchPassword, timeLimit, countLimit, pageSize, pageCookie, autoPage) {
     	var result = createEmptySearchResult();
     	if (isBlank(searchFilter)) {
     		return result;
     	}
     	var normalizedSearchBase = isNotBlank(searchBase) ? "" + searchBase : "";
     	var normalizedPageSize = pageSize > 0 ? pageSize : 0;
+    	var autoPageValue = autoPage === true;
+    	var currentPageCookie = normalizeOptionalText(pageCookie);
     	var ldapContext = null;
     	var searchResults = null;
     	try {
     		ldapContext = createLdapContext(ldapUrl, searchLogin, searchPassword);
-    		if (normalizedPageSize > 0) {
-    			ldapContext.setRequestControls(createLdapControlArray(new PagedResultsControl(normalizedPageSize, decodePageCookie(pageCookie), false)));
-    		}
     		var searchControls = new SearchControls();
     		searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
     		searchControls.setReturningAttributes(createStringArray(requestedAttributes));
     		searchControls.setTimeLimit(timeLimit > 0 ? timeLimit : 0);
-    		searchControls.setCountLimit(countLimit > 0 ? countLimit : 0);
-    		searchResults = ldapContext.search(normalizedSearchBase, searchFilter, searchControls);
     		while (true) {
-    			var searchResult = getNextSearchResult(searchResults, entryType);
-    			if (searchResult == null) {
+    			var remainingLimit = countLimit > 0 ? countLimit - result.returnedCount : 0;
+    			if (countLimit > 0 && remainingLimit <= 0) {
+    				result.nextPageCookie = "";
+    				result.hasMorePages = false;
     				break;
     			}
-    			var relativeDn = getRelativeDn(searchResult);
-    			var attributes = {};
-    			var resultAttributes = searchResult.getAttributes();
-    			for (var i = 0; i < requestedAttributes.length; i++) {
-    				var attributeName = requestedAttributes[i];
-    				if (isBlank(attributeName)) {
-    					continue;
+    			searchControls.setCountLimit(countLimit > 0 ? remainingLimit : 0);
+    			if (normalizedPageSize > 0) {
+    				ldapContext.setRequestControls(createLdapControlArray(new PagedResultsControl(normalizedPageSize, decodePageCookie(currentPageCookie), false)));
+    			}
+    			searchResults = ldapContext.search(normalizedSearchBase, searchFilter, searchControls);
+    			result.processedPagesCount++;
+    			while (true) {
+    				var searchResult = getNextSearchResult(searchResults, entryType);
+    				if (searchResult == null) {
+    					break;
     				}
-    				var values = toAttributeValues(resultAttributes == null ? null : resultAttributes.get(attributeName));
-    				if (values.length > 0) {
-    					attributes[attributeName] = values;
+    				var relativeDn = getRelativeDn(searchResult);
+    				var attributes = {};
+    				var resultAttributes = searchResult.getAttributes();
+    				for (var i = 0; i < requestedAttributes.length; i++) {
+    					var attributeName = requestedAttributes[i];
+    					if (isBlank(attributeName)) {
+    						continue;
+    					}
+    					var values = toAttributeValues(resultAttributes == null ? null : resultAttributes.get(attributeName));
+    					if (values.length > 0) {
+    						attributes[attributeName] = values;
+    					}
+    				}
+    				var distinguishedName = firstValue(attributes, ["distinguishedName"]);
+    				if (isBlank(distinguishedName)) {
+    					distinguishedName = getDistinguishedName(searchResult, normalizedSearchBase, relativeDn);
+    					if (isNotBlank(distinguishedName)) {
+    						attributes.distinguishedName = [distinguishedName];
+    					}
+    				}
+    				var entry = {
+    					entryType: entryType,
+    					relativeDn: relativeDn,
+    					distinguishedName: distinguishedName,
+    					accountName: firstValue(attributes, ["sAMAccountName", "uid", "cn"]),
+    					commonName: firstValue(attributes, ["cn"]),
+    					displayName: firstValue(attributes, ["displayName", "cn", "uid", "sAMAccountName"]),
+    					mail: firstValue(attributes, ["mail"]),
+    					rdns: includeRdn ? parseRdns(distinguishedName) : [],
+    					requestedAttributes: requestedAttributes.slice(0),
+    					attributes: attributes
+    				};
+    				result.returnedCount++;
+    				if (collectResults) {
+    					result.entries.push(entry);
+    				}
+    				if (emitEntriesXml && targetNode != null) {
+    					appendEntry(targetNode, entry, emitAttributesJson);
+    				}
+    				if (countLimit > 0 && result.returnedCount >= countLimit) {
+    					break;
     				}
     			}
-    			var distinguishedName = firstValue(attributes, ["distinguishedName"]);
-    			if (isBlank(distinguishedName)) {
-    				distinguishedName = getDistinguishedName(searchResult, normalizedSearchBase, relativeDn);
-    				if (isNotBlank(distinguishedName)) {
-    					attributes.distinguishedName = [distinguishedName];
+    			if (searchResults != null) {
+    				try {
+    					searchResults.close();
     				}
+    				catch (e) {
+    				}
+    				searchResults = null;
     			}
-    			var entry = {
-    				entryType: entryType,
-    				relativeDn: relativeDn,
-    				distinguishedName: distinguishedName,
-    				accountName: firstValue(attributes, ["sAMAccountName", "uid", "cn"]),
-    				commonName: firstValue(attributes, ["cn"]),
-    				displayName: firstValue(attributes, ["displayName", "cn", "uid", "sAMAccountName"]),
-    				mail: firstValue(attributes, ["mail"]),
-    				rdns: includeRdn ? parseRdns(distinguishedName) : [],
-    				requestedAttributes: requestedAttributes.slice(0),
-    				attributes: attributes
-    			};
-    			result.returnedCount++;
-    			if (collectResults) {
-    				result.entries.push(entry);
+    			if (normalizedPageSize <= 0) {
+    				result.nextPageCookie = "";
+    				result.hasMorePages = false;
+    				break;
     			}
-    			if (emitEntriesXml && targetNode != null) {
-    				appendEntry(targetNode, entry, emitAttributesJson);
-    			}
-    		}
-    		if (normalizedPageSize > 0) {
     			result.nextPageCookie = extractPagedResultsCookie(ldapContext);
     			result.hasMorePages = result.nextPageCookie !== "";
+    			if (!autoPageValue || !result.hasMorePages || (countLimit > 0 && result.returnedCount >= countLimit)) {
+    				if (autoPageValue && countLimit > 0 && result.returnedCount >= countLimit) {
+    					result.nextPageCookie = "";
+    					result.hasMorePages = false;
+    				}
+    				break;
+    			}
+    			if (result.nextPageCookie === currentPageCookie) {
+    				log.warn("Stopping LDAP auto paging for " + entryType + " because the next page cookie did not change.");
+    				result.nextPageCookie = "";
+    				result.hasMorePages = false;
+    				break;
+    			}
+    			currentPageCookie = result.nextPageCookie;
     		}
     	}
     	finally {
@@ -662,6 +702,7 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     var emitGroupsJsonValue = parseBoolean(emitGroupsJSON, false);
     var emitDirectoryJsonValue = parseBoolean(emitDirectoryJSON, false);
     var emitAttributesJsonValue = parseBoolean(emitAttributesJSON, false);
+    var userAutoPageValue = parseBoolean(userAutoPage, false);
     var userPageSizeValue = parseInteger(userPageSize, 500);
     var groupPageSizeValue = parseInteger(groupPageSize, 500);
     var userPageCookieValue = normalizeOptionalText(userPageCookie);
@@ -688,8 +729,8 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     var collectUsersValue = emitUsersJsonValue || emitDirectoryJsonValue;
     var collectGroupsValue = emitGroupsJsonValue || emitDirectoryJsonValue;
     
-    var usersResult = includeUsersValue ? searchEntries("user", usersBase, effectiveUserSearchFilterValue, userAttributes, usersNode, includeRdnValue, emitUsersXmlValue, emitAttributesJsonValue, collectUsersValue, ldapServer, searchLogin, searchPassword, timeLimitValue, countLimitValue, userPageSizeValue, userPageCookieValue) : createEmptySearchResult();
-    var groupsResult = includeGroupsValue ? searchEntries("group", groupsBase, groupSearchFilterValue, groupAttributes, groupsNode, includeRdnValue, emitGroupsXmlValue, emitAttributesJsonValue, collectGroupsValue, ldapServer, searchLogin, searchPassword, timeLimitValue, countLimitValue, groupPageSizeValue, groupPageCookieValue) : createEmptySearchResult();
+    var usersResult = includeUsersValue ? searchEntries("user", usersBase, effectiveUserSearchFilterValue, userAttributes, usersNode, includeRdnValue, emitUsersXmlValue, emitAttributesJsonValue, collectUsersValue, ldapServer, searchLogin, searchPassword, timeLimitValue, countLimitValue, userPageSizeValue, userPageCookieValue, userAutoPageValue) : createEmptySearchResult();
+    var groupsResult = includeGroupsValue ? searchEntries("group", groupsBase, groupSearchFilterValue, groupAttributes, groupsNode, includeRdnValue, emitGroupsXmlValue, emitAttributesJsonValue, collectGroupsValue, ldapServer, searchLogin, searchPassword, timeLimitValue, countLimitValue, groupPageSizeValue, groupPageCookieValue, false) : createEmptySearchResult();
     var users = usersResult.entries;
     var groups = groupsResult.entries;
     
@@ -705,6 +746,7 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     	includeUsers: includeUsersValue,
     	includeGroups: includeGroupsValue,
     	includeRDN: includeRdnValue,
+    	userAutoPage: userAutoPageValue,
     	userPageSize: userPageSizeValue,
     	groupPageSize: groupPageSizeValue,
     	countLimit: countLimitValue,
@@ -712,6 +754,8 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     	usersCount: usersResult.returnedCount,
     	groupsCount: groupsResult.returnedCount,
     	totalCount: usersResult.returnedCount + groupsResult.returnedCount,
+    	usersProcessedPagesCount: usersResult.processedPagesCount,
+    	groupsProcessedPagesCount: groupsResult.processedPagesCount,
     	usersHasMorePages: usersResult.hasMorePages,
     	groupsHasMorePages: groupsResult.hasMorePages,
     	nextUserPageCookie: usersResult.nextPageCookie,
@@ -730,6 +774,7 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     	appendTextElement(summaryNode, "includeUsers", summary.includeUsers, "boolean");
     	appendTextElement(summaryNode, "includeGroups", summary.includeGroups, "boolean");
     	appendTextElement(summaryNode, "includeRDN", summary.includeRDN, "boolean");
+    	appendTextElement(summaryNode, "userAutoPage", summary.userAutoPage, "boolean");
     	appendTextElement(summaryNode, "userPageSize", summary.userPageSize, "number");
     	appendTextElement(summaryNode, "groupPageSize", summary.groupPageSize, "number");
     	appendTextElement(summaryNode, "countLimit", summary.countLimit, "number");
@@ -737,6 +782,8 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     	appendTextElement(summaryNode, "usersCount", summary.usersCount, "number");
     	appendTextElement(summaryNode, "groupsCount", summary.groupsCount, "number");
     	appendTextElement(summaryNode, "totalCount", summary.totalCount, "number");
+    	appendTextElement(summaryNode, "usersProcessedPagesCount", summary.usersProcessedPagesCount, "number");
+    	appendTextElement(summaryNode, "groupsProcessedPagesCount", summary.groupsProcessedPagesCount, "number");
     	appendTextElement(summaryNode, "usersHasMorePages", summary.usersHasMorePages, "boolean");
     	appendTextElement(summaryNode, "groupsHasMorePages", summary.groupsHasMorePages, "boolean");
     	appendTextElement(summaryNode, "nextUserPageCookie", summary.nextUserPageCookie, null);
@@ -821,6 +868,9 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
   value: 500.0
 ↓userPageCookie [variables.RequestableVariable-1776184632916]: 
   comment: Opaque Base64 cookie returned by the previous user page. Leave empty for the first page.
+↓userAutoPage [variables.RequestableVariable-1780564772512]: 
+  comment: Set to true to fetch all LDAP user pages in one request, keeping the same LDAP connection for paged-results cookie continuity.
+  value: false
 ↓groupPageSize [variables.RequestableVariable-1776184632929]: 
   comment: LDAP paged-results size for groups. Defaults to 500 to keep direct calls memory-bounded. Use 0 only to disable group pagination.
   value: 500.0

@@ -379,6 +379,7 @@ responseTimeout: 600
     var nextUserPageCookieValue = "";
     var usersHasMorePagesRaw = "false";
     var usersHasMorePagesValue = currentUserPageSize > 0;
+    var ldapUsersProcessedPagesCount = 0;
     var lastUsersHasMorePagesValue = false;
     var lastNextUserPageCookiePresent = false;
     var lastUserPageWasFull = false;
@@ -550,6 +551,8 @@ responseTimeout: 600
               - ↑value: 1776185313083
             - java.lang.String: 
               - ↑value: ./text()
+    ↓userAutoPage [variables.StepVariable-1780564772516]: 
+      value: true
   ↓directoryUsersJson [steps.SimpleSourceStep-1776185313131]: 
     sourceDefinition: 
       - xmlizable: 
@@ -580,6 +583,16 @@ responseTimeout: 600
           - java.lang.String: 
             - ↑value: ./document/summary/usersHasMorePages/text()
     variableName: usersHasMorePagesRaw
+  ↓LDAP_Users_Processed_Pages_Count [steps.SimpleSourceStep-1780564772514]: 
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1776185313085
+          - java.lang.String: 
+            - ↑value: ./document/summary/usersProcessedPagesCount/text()
+    variableName: ldapUsersProcessedPagesCount
   ↓Build_Forms_Payload [steps.SimpleStep-1776185313137]: 
     expression: |
       'var users = [];
@@ -871,6 +884,7 @@ responseTimeout: 600
     expression: |
       'totalProcessedPages++;
       var normalizedNextCookie = normalizeOptionalText(nextUserPageCookieValue);
+      var ldapUsersProcessedPagesCountValue = parseInteger(ldapUsersProcessedPagesCount, 0);
       lastUsersHasMorePagesValue = parseBoolean(usersHasMorePagesRaw, false);
       lastNextUserPageCookiePresent = normalizedNextCookie !== "";
       lastUserPageWasFull = currentUserPageSize > 0 && pageUsersFromDirectoryCount >= currentUserPageSize;
@@ -900,7 +914,7 @@ responseTimeout: 600
       }
       else {
           if (paginationStopReason === "") {
-              paginationStopReason = lastUserPageWasFull && configuredCountLimitValue <= 0 ? "LDAP reported no more pages after a full page" : "LDAP reported last page";
+              paginationStopReason = ldapUsersProcessedPagesCountValue > 1 ? "LDAP auto-paging completed" : (lastUserPageWasFull && configuredCountLimitValue <= 0 ? "LDAP reported no more pages after a full page" : "LDAP reported last page");
           }
           currentUserPageCookie = "";
       }
@@ -937,6 +951,7 @@ responseTimeout: 600
         formsDirectoryGroupPrefix: formsDirectoryGroupPrefixValue,
         pageSize: requestedPageSizeValue,
         processedPagesCount: totalProcessedPages,
+        ldapUsersProcessedPagesCount: parseInteger(ldapUsersProcessedPagesCount, 0),
         lastUsersHasMorePages: lastUsersHasMorePagesValue,
         lastNextUserPageCookiePresent: lastNextUserPageCookiePresent,
         lastUserPageWasFull: lastUserPageWasFull,
@@ -1003,6 +1018,9 @@ responseTimeout: 600
   ↓processedPagesCount [steps.ElementStep-1776185313245]: 
     expression: syncSummary.processedPagesCount
     nodeName: processedPagesCount
+  ↓ldapUsersProcessedPagesCount [steps.ElementStep-1780564772518]: 
+    expression: syncSummary.ldapUsersProcessedPagesCount
+    nodeName: ldapUsersProcessedPagesCount
   ↓lastUsersHasMorePages [steps.ElementStep-1780561914108]: 
     expression: syncSummary.lastUsersHasMorePages
     nodeName: lastUsersHasMorePages

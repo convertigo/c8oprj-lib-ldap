@@ -117,6 +117,9 @@ Exports LDAP or Active Directory user accounts and groups with caller-provided f
 <td>timeLimit</td><td>LDAP time limit passed to the search. Use 0 for no limit.</td>
 </tr>
 <tr>
+<td>userAutoPage</td><td>Set to true to fetch all LDAP user pages in one request, keeping the same LDAP connection for paged-results cookie continuity.</td>
+</tr>
+<tr>
 <td>userExclusionFilter</td><td>Optional LDAP filter for user accounts to exclude, for example (|(sAMAccountName=krbtgt)(sAMAccountName=svc_*))</td>
 </tr>
 <tr>

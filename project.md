@@ -294,6 +294,14 @@ LDAP time limit passed to the search. Use 0 for no limit.
 </tr>
 <tr>
 <td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;userAutoPage
+</td>
+<td>
+Set to true to fetch all LDAP user pages in one request, keeping the same LDAP connection for paged-results cookie continuity.
+</td>
+</tr>
+<tr>
+<td>
 <img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;userExclusionFilter
 </td>
 <td>
