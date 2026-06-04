@@ -117,13 +117,16 @@ Exports LDAP or Active Directory user accounts and groups with caller-provided f
 <td>timeLimit</td><td>LDAP time limit passed to the search. Use 0 for no limit.</td>
 </tr>
 <tr>
-<td>userAutoPage</td><td>Set to true to fetch all LDAP user pages in one request, keeping the same LDAP connection for paged-results cookie continuity.</td>
+<td>userAutoPage</td><td>Set to true to walk LDAP pages on the same connection before returning one bounded user page. Use with userPageOffset for cookie-safe pagination.</td>
 </tr>
 <tr>
 <td>userExclusionFilter</td><td>Optional LDAP filter for user accounts to exclude, for example (|(sAMAccountName=krbtgt)(sAMAccountName=svc_*))</td>
 </tr>
 <tr>
 <td>userPageCookie</td><td>Opaque Base64 cookie returned by the previous user page. Leave empty for the first page.</td>
+</tr>
+<tr>
+<td>userPageOffset</td><td>Number of LDAP user entries to skip before collecting the returned page when userAutoPage is true.</td>
 </tr>
 <tr>
 <td>userPageSize</td><td>LDAP paged-results size for users. Defaults to 500 to keep direct calls memory-bounded. Use 0 only to disable user pagination.</td>

@@ -376,6 +376,7 @@ responseTimeout: 600
     }
     
     var currentUserPageCookie = "";
+    var currentUserPageOffset = 0;
     var nextUserPageCookieValue = "";
     var usersHasMorePagesRaw = "false";
     var usersHasMorePagesValue = currentUserPageSize > 0;
@@ -420,6 +421,10 @@ responseTimeout: 600
   ↓Current_User_Page_Cookie [steps.ElementStep-1776185313083]: 
     expression: currentUserPageCookie
     nodeName: currentUserPageCookie
+    output: false
+  ↓Current_User_Page_Offset [steps.ElementStep-1780565717095]: 
+    expression: currentUserPageOffset
+    nodeName: currentUserPageOffset
     output: false
   ↓Call_Sequence [steps.SequenceStep-1776185313085]: 
     sourceSequence: lib_LDAP.exportDirectoryAccountsAndGroups
@@ -553,6 +558,15 @@ responseTimeout: 600
               - ↑value: ./text()
     ↓userAutoPage [variables.StepVariable-1780564772516]: 
       value: true
+    ↓userPageOffset [variables.StepVariable-1780565717097]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1780565717095
+            - java.lang.String: 
+              - ↑value: ./text()
   ↓directoryUsersJson [steps.SimpleSourceStep-1776185313131]: 
     sourceDefinition: 
       - xmlizable: 
@@ -898,15 +912,18 @@ responseTimeout: 600
               paginationStopReason = "countLimit reached";
           }
       }
+      currentUserPageOffset += pageUsersFromDirectoryCount;
       
       if (usersHasMorePagesValue) {
           if (normalizedNextCookie === "" || normalizedNextCookie === currentUserPageCookie) {
-              paginationStopReason = normalizedNextCookie === "" ? "missing next LDAP page cookie" : "unchanged LDAP page cookie";
-              if (normalizedNextCookie !== "" && normalizedNextCookie === currentUserPageCookie) {
-                  log.warn("Stopping LDAP sync pagination because the next user page cookie did not change.");
+              if (normalizedNextCookie === "") {
+                  paginationStopReason = "missing next LDAP page cookie";
+                  usersHasMorePagesValue = false;
+                  currentUserPageCookie = "";
               }
-              usersHasMorePagesValue = false;
-              currentUserPageCookie = "";
+              else {
+                  currentUserPageCookie = normalizedNextCookie;
+              }
           }
           else {
               currentUserPageCookie = normalizedNextCookie;

@@ -297,7 +297,7 @@ LDAP time limit passed to the search. Use 0 for no limit.
 <img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;userAutoPage
 </td>
 <td>
-Set to true to fetch all LDAP user pages in one request, keeping the same LDAP connection for paged-results cookie continuity.
+Set to true to walk LDAP pages on the same connection before returning one bounded user page. Use with userPageOffset for cookie-safe pagination.
 </td>
 </tr>
 <tr>
@@ -314,6 +314,14 @@ Optional LDAP filter for user accounts to exclude, for example (|(sAMAccountName
 </td>
 <td>
 Opaque Base64 cookie returned by the previous user page. Leave empty for the first page.
+</td>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;userPageOffset
+</td>
+<td>
+Number of LDAP user entries to skip before collecting the returned page when userAutoPage is true.
 </td>
 </tr>
 <tr>
