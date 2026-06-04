@@ -379,6 +379,10 @@ responseTimeout: 600
     var nextUserPageCookieValue = "";
     var usersHasMorePagesRaw = "false";
     var usersHasMorePagesValue = currentUserPageSize > 0;
+    var lastUsersHasMorePagesValue = false;
+    var lastNextUserPageCookiePresent = false;
+    var lastUserPageWasFull = false;
+    var paginationStopReason = "";
     var totalUsersFromDirectoryCount = 0;
     var totalPreparedUserDocumentsCount = 0;
     var totalPreparedReservedGroupsCount = 0;
@@ -866,18 +870,24 @@ responseTimeout: 600
   ↓Advance_Pagination [steps.SimpleStep-1776185313169]: 
     expression: |
       'totalProcessedPages++;
-      usersHasMorePagesValue = parseBoolean(usersHasMorePagesRaw, false);
+      var normalizedNextCookie = normalizeOptionalText(nextUserPageCookieValue);
+      lastUsersHasMorePagesValue = parseBoolean(usersHasMorePagesRaw, false);
+      lastNextUserPageCookiePresent = normalizedNextCookie !== "";
+      lastUserPageWasFull = currentUserPageSize > 0 && pageUsersFromDirectoryCount >= currentUserPageSize;
+      usersHasMorePagesValue = lastUsersHasMorePagesValue;
+      paginationStopReason = "";
       if (remainingUsersLimit > 0) {
           remainingUsersLimit -= pageUsersFromDirectoryCount;
           if (remainingUsersLimit <= 0) {
               remainingUsersLimit = 0;
               usersHasMorePagesValue = false;
+              paginationStopReason = "countLimit reached";
           }
       }
       
       if (usersHasMorePagesValue) {
-          var normalizedNextCookie = normalizeOptionalText(nextUserPageCookieValue);
           if (normalizedNextCookie === "" || normalizedNextCookie === currentUserPageCookie) {
+              paginationStopReason = normalizedNextCookie === "" ? "missing next LDAP page cookie" : "unchanged LDAP page cookie";
               if (normalizedNextCookie !== "" && normalizedNextCookie === currentUserPageCookie) {
                   log.warn("Stopping LDAP sync pagination because the next user page cookie did not change.");
               }
@@ -889,6 +899,9 @@ responseTimeout: 600
           }
       }
       else {
+          if (paginationStopReason === "") {
+              paginationStopReason = lastUserPageWasFull && configuredCountLimitValue <= 0 ? "LDAP reported no more pages after a full page" : "LDAP reported last page";
+          }
           currentUserPageCookie = "";
       }
       
@@ -898,6 +911,9 @@ responseTimeout: 600
       }
       if (currentUserPageSize <= 0) {
           usersHasMorePagesValue = false;
+          if (paginationStopReason === "") {
+              paginationStopReason = "page size exhausted";
+          }
       }
       groupMappings = [];
       formsDocumentsJSON = "[]";
@@ -921,6 +937,10 @@ responseTimeout: 600
         formsDirectoryGroupPrefix: formsDirectoryGroupPrefixValue,
         pageSize: requestedPageSizeValue,
         processedPagesCount: totalProcessedPages,
+        lastUsersHasMorePages: lastUsersHasMorePagesValue,
+        lastNextUserPageCookiePresent: lastNextUserPageCookiePresent,
+        lastUserPageWasFull: lastUserPageWasFull,
+        paginationStopReason: paginationStopReason,
         usersFromDirectoryCount: totalUsersFromDirectoryCount,
         preparedUserDocumentsCount: totalPreparedUserDocumentsCount,
         preparedReservedGroupsCount: totalPreparedReservedGroupsCount,
@@ -983,6 +1003,18 @@ responseTimeout: 600
   ↓processedPagesCount [steps.ElementStep-1776185313245]: 
     expression: syncSummary.processedPagesCount
     nodeName: processedPagesCount
+  ↓lastUsersHasMorePages [steps.ElementStep-1780561914108]: 
+    expression: syncSummary.lastUsersHasMorePages
+    nodeName: lastUsersHasMorePages
+  ↓lastNextUserPageCookiePresent [steps.ElementStep-1780561919952]: 
+    expression: syncSummary.lastNextUserPageCookiePresent
+    nodeName: lastNextUserPageCookiePresent
+  ↓lastUserPageWasFull [steps.ElementStep-1780561923337]: 
+    expression: syncSummary.lastUserPageWasFull
+    nodeName: lastUserPageWasFull
+  ↓paginationStopReason [steps.ElementStep-1780561930250]: 
+    expression: syncSummary.paginationStopReason
+    nodeName: paginationStopReason
   ↓includeDirectoryGroups [steps.ElementStep-1780071843986]: 
     expression: syncSummary.includeDirectoryGroups
     nodeName: includeDirectoryGroups

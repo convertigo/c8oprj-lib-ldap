@@ -298,14 +298,36 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     	}
     };
     
+    var decodePagedResultsResponseControl = function (control) {
+    	if (control == null || control == undefined) {
+    		return null;
+    	}
+    	try {
+    		if (control instanceof PagedResultsResponseControl) {
+    			return control;
+    		}
+    	}
+    	catch (e) {
+    	}
+    	try {
+    		if ("" + control.getID() === "1.2.840.113556.1.4.319") {
+    			return new PagedResultsResponseControl(control.getID(), control.isCritical(), control.getEncodedValue());
+    		}
+    	}
+    	catch (e1) {
+    		log.warn("Unable to decode LDAP paged response control: " + e1);
+    	}
+    	return null;
+    };
+    
     var extractPagedResultsCookie = function (ldapContext) {
     	try {
     		var controls = ldapContext.getResponseControls();
     		if (controls != null) {
     			for (var i = 0; i < controls.length; i++) {
-    				var control = controls[i];
-    				if (control instanceof PagedResultsResponseControl) {
-    					return encodePageCookie(control.getCookie());
+    				var pagedControl = decodePagedResultsResponseControl(controls[i]);
+    				if (pagedControl != null) {
+    					return encodePageCookie(pagedControl.getCookie());
     				}
     			}
     		}
