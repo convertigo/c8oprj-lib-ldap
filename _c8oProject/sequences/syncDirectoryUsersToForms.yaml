@@ -348,10 +348,7 @@ responseTimeout: 600
         }
         return uniqueStringValues(groups);
     };
-    var logUserSync = function(level, message) {
-        if (debugUserCreationLogsValue !== true) {
-            return;
-        }
+    var logUserSyncStatus = function(level, message) {
         var prefix = "[syncDirectoryUsersToForms] ";
         if (level === "warn") {
             log.warn(prefix + message);
@@ -362,6 +359,12 @@ responseTimeout: 600
         else {
             log.info(prefix + message);
         }
+    };
+    var logUserSync = function(level, message) {
+        if (debugUserCreationLogsValue !== true) {
+            return;
+        }
+        logUserSyncStatus(level, message);
     };
     
     var requestedPageSizeValue = parseInteger(pageSize, 500);
@@ -381,6 +384,9 @@ responseTimeout: 600
     var usersHasMorePagesRaw = "false";
     var usersHasMorePagesValue = currentUserPageSize > 0;
     var ldapUsersProcessedPagesCount = 0;
+    var seenUserPageSignatures = {};
+    var currentUserPageSignature = "";
+    var currentUserPageIsDuplicate = false;
     var lastUsersHasMorePagesValue = false;
     var lastNextUserPageCookiePresent = false;
     var lastUserPageWasFull = false;
@@ -391,6 +397,11 @@ responseTimeout: 600
     var totalSkippedUsersCount = 0;
     var totalFilteredOutUsersCount = 0;
     var totalProcessedPages = 0;
+    var formsWriteAttemptsCount = 0;
+    var formsWriteAttemptedDocumentsCount = 0;
+    var formsWriteResponseDocumentsCount = 0;
+    var formsWriteOkDocumentsCount = 0;
+    var formsWriteErrorDocumentsCount = 0;
     var shouldWriteToFormsAny = false;
     var shouldSyncReservedGroupsAny = false;
     var shouldClearCache = false;
@@ -661,6 +672,26 @@ responseTimeout: 600
       var displayNameAttributeNames = normalizeAttributeNames(userDisplayNameAttributes, ["displayName", "commonName", "cn", "uid", "sAMAccountName", "accountName"]);
       var givenNameAttributeNames = normalizeAttributeNames(userGivenNameAttributes, ["givenName"]);
       var surnameAttributeNames = normalizeAttributeNames(userSurnameAttributes, ["sn"]);
+      var getEntryStableIdentifier = function(entry) {
+          var distinguishedNameValue = normalizeOptionalText(entry ? entry.distinguishedName : "");
+          if (distinguishedNameValue === "") {
+              distinguishedNameValue = getFirstAttributeValue(entry, "distinguishedName");
+          }
+          if (distinguishedNameValue !== "") {
+              return distinguishedNameValue;
+          }
+          var accountNameValue = getFirstEntryValue(entry, accountNameAttributeNames);
+          if (accountNameValue !== "") {
+              return accountNameValue;
+          }
+          return normalizeOptionalText(entry ? entry.relativeDn : "");
+      };
+      var buildUserPageSignature = function(pageUsers) {
+          if (!pageUsers || pageUsers.length === 0) {
+              return "";
+          }
+          return pageUsers.length + "|" + getEntryStableIdentifier(pageUsers[0] || {}) + "|" + getEntryStableIdentifier(pageUsers[pageUsers.length - 1] || {});
+      };
       var currentPageIndex = totalProcessedPages + 1;
       var userDocuments = [];
       formsDocumentAcls = [];
@@ -669,7 +700,16 @@ responseTimeout: 600
       pageFilteredOutUsersCount = 0;
       pagePreparedDirectoryGroupsCount = 0;
       pagePreparedGroupMappingsCount = 0;
-      logUserSync("info", "page " + currentPageIndex + " received " + users.length + " LDAP candidate user(s)");
+      currentUserPageSignature = buildUserPageSignature(users);
+      currentUserPageIsDuplicate = currentUserPageSignature !== "" && seenUserPageSignatures[currentUserPageSignature] === true;
+      if (currentUserPageIsDuplicate) {
+          logUserSyncStatus("warn", "page " + currentPageIndex + " has the same LDAP signature as an already processed page; stopping before writing duplicate Forms payload");
+          users = [];
+      }
+      else if (currentUserPageSignature !== "") {
+          seenUserPageSignatures[currentUserPageSignature] = true;
+      }
+      logUserSyncStatus("info", "page " + currentPageIndex + " received " + users.length + " LDAP candidate user(s)");
       for (var i = 0; i < users.length; i++) {
           var entry = users[i] || {};
           var distinguishedNameValue = normalizeOptionalText(entry.distinguishedName);
@@ -739,9 +779,7 @@ responseTimeout: 600
       totalPreparedGroupMappingsCount += pagePreparedGroupMappingsCount;
       totalSkippedUsersCount += pageSkippedUsersCount;
       totalFilteredOutUsersCount += pageFilteredOutUsersCount;
-      shouldWriteToFormsAny = shouldWriteToFormsAny || shouldWriteCurrentPageToForms;
-      shouldSyncReservedGroupsAny = shouldSyncReservedGroupsAny || shouldSyncCurrentPageReservedGroups;
-      logUserSync("info", "page " + currentPageIndex + " summary: candidates=" + pageUsersFromDirectoryCount + ", preparedUserDocuments=" + pagePreparedUserDocumentsCount + ", preparedReservedGroups=" + pagePreparedReservedGroupsCount + ", preparedDirectoryGroups=" + pagePreparedDirectoryGroupsCount + ", preparedGroupMappings=" + pagePreparedGroupMappingsCount + ", skipped=" + pageSkippedUsersCount + ", filteredOut=" + pageFilteredOutUsersCount + ", shouldWriteToForms=" + shouldWriteCurrentPageToForms);'
+      logUserSyncStatus("info", "page " + currentPageIndex + " summary: candidates=" + pageUsersFromDirectoryCount + ", preparedUserDocuments=" + pagePreparedUserDocumentsCount + ", preparedReservedGroups=" + pagePreparedReservedGroupsCount + ", preparedDirectoryGroups=" + pagePreparedDirectoryGroupsCount + ", preparedGroupMappings=" + pagePreparedGroupMappingsCount + ", skipped=" + pageSkippedUsersCount + ", filteredOut=" + pageFilteredOutUsersCount + ", shouldWriteToForms=" + shouldWriteCurrentPageToForms);'
   ↓Normalize_Case_Sensitive_Identifiers [steps.SimpleStep-1780406189268]: 
     expression: |
       'var caseSensitiveUserIdsValue = parseBoolean(casesensitive, true);
@@ -783,6 +821,30 @@ responseTimeout: 600
               groupMapping.user = normalizeFormsIdentifier(groupMapping.user);
               groupMapping.group = normalizeReservedGroupName(groupMapping.group);
           }
+      }
+      var formsDocumentsForWrite = [];
+      try {
+          formsDocumentsForWrite = formsDocumentsJSON !== undefined && formsDocumentsJSON !== null && normalizeOptionalText(formsDocumentsJSON) !== "" ? JSON.parse("" + formsDocumentsJSON) : [];
+      }
+      catch (e) {
+          formsDocumentsForWrite = [];
+      }
+      pagePreparedUserDocumentsCount = formsDocumentsForWrite.length;
+      pagePreparedReservedGroupsCount = formsDocumentsForWrite.length;
+      shouldWriteCurrentPageToForms = dryRunValue !== true && pagePreparedUserDocumentsCount > 0;
+      shouldSyncCurrentPageReservedGroups = dryRunValue !== true && groupMappings.length > 0;
+      shouldWriteToFormsAny = shouldWriteToFormsAny || shouldWriteCurrentPageToForms;
+      shouldSyncReservedGroupsAny = shouldSyncReservedGroupsAny || shouldSyncCurrentPageReservedGroups;
+      if (dryRunValue === true && (pagePreparedUserDocumentsCount > 0 || groupMappings.length > 0)) {
+          logUserSyncStatus("info", "page " + (totalProcessedPages + 1) + " dryRun=true; skipped Forms write for " + pagePreparedUserDocumentsCount + " user document(s)");
+      }
+      else if (shouldWriteCurrentPageToForms) {
+          formsWriteAttemptsCount++;
+          formsWriteAttemptedDocumentsCount += pagePreparedUserDocumentsCount;
+          logUserSyncStatus("info", "page " + (totalProcessedPages + 1) + " writing " + pagePreparedUserDocumentsCount + " Forms user document(s) to c8oforms_fs");
+      }
+      else {
+          logUserSyncStatus("info", "page " + (totalProcessedPages + 1) + " has no Forms user document to write");
       }'
   ↓Forms_Documents_JSON [steps.ElementStep-1776185313139]: 
     expression: formsDocumentsJSON
@@ -840,26 +902,57 @@ responseTimeout: 600
       variableName: formsWriteResponseNodes
     ↓Log_Forms_Write_Response [steps.SimpleStep-1780408773459]: 
       expression: |
-        'if (debugUserCreationLogsValue === true) {
-            var responseJson = "{}";
-            try {
-                var responseNode = null;
-                if (formsWriteResponseNodes !== null && formsWriteResponseNodes !== undefined) {
-                    if (formsWriteResponseNodes.getLength !== undefined && formsWriteResponseNodes.getLength() > 0) {
-                        responseNode = formsWriteResponseNodes.item(0);
-                    }
-                    else if (formsWriteResponseNodes.length !== undefined && formsWriteResponseNodes.length > 0) {
-                        responseNode = formsWriteResponseNodes.item(0);
-                    }
+        'var responseJson = "{}";
+        var responseNode = null;
+        var responseItemsCount = 0;
+        var responseOkCount = 0;
+        var responseErrorCount = 0;
+        try {
+            if (formsWriteResponseNodes !== null && formsWriteResponseNodes !== undefined) {
+                if (formsWriteResponseNodes.getLength !== undefined && formsWriteResponseNodes.getLength() > 0) {
+                    responseNode = formsWriteResponseNodes.item(0);
                 }
-                if (responseNode !== null) {
-                    responseJson = "" + com.twinsoft.convertigo.engine.util.XMLUtils.XmlToJson(responseNode, true, true);
+                else if (formsWriteResponseNodes.length !== undefined && formsWriteResponseNodes.length > 0) {
+                    responseNode = formsWriteResponseNodes.item(0);
                 }
             }
-            catch (e) {
-                responseJson = "{\"serializationError\":\"" + ("" + e).replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\"}";
+            if (responseNode !== null) {
+                responseJson = "" + com.twinsoft.convertigo.engine.util.XMLUtils.XmlToJson(responseNode, true, true);
+                var childNodes = responseNode.getChildNodes();
+                for (var responseChildIndex = 0; responseChildIndex < childNodes.getLength(); responseChildIndex++) {
+                    var childNode = childNodes.item(responseChildIndex);
+                    if (childNode === null || childNode.getNodeType() != 1) {
+                        continue;
+                    }
+                    responseItemsCount++;
+                    var okNodes = childNode.getElementsByTagName("ok");
+                    if (okNodes !== null && okNodes.getLength() > 0 && normalizeOptionalText(okNodes.item(0).getTextContent()).toLowerCase() === "true") {
+                        responseOkCount++;
+                    }
+                    var errorNodes = childNode.getElementsByTagName("error");
+                    if (errorNodes !== null && errorNodes.getLength() > 0 && normalizeOptionalText(errorNodes.item(0).getTextContent()) !== "") {
+                        responseErrorCount++;
+                    }
+                }
             }
-            logUserSync("info", "PostBulkDocuments response for page " + (totalProcessedPages + 1) + ": " + responseJson);
+        }
+        catch (e) {
+            responseJson = "{\"serializationError\":\"" + ("" + e).replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\"}";
+        }
+        formsWriteResponseDocumentsCount += responseItemsCount;
+        formsWriteOkDocumentsCount += responseOkCount;
+        formsWriteErrorDocumentsCount += responseErrorCount;
+        if (responseNode === null) {
+            logUserSyncStatus("warn", "page " + (totalProcessedPages + 1) + " PostBulkDocuments returned no couchdb_output node");
+        }
+        else if (responseErrorCount > 0) {
+            logUserSyncStatus("warn", "page " + (totalProcessedPages + 1) + " PostBulkDocuments response items=" + responseItemsCount + ", ok=" + responseOkCount + ", errors=" + responseErrorCount);
+        }
+        else {
+            logUserSyncStatus("info", "page " + (totalProcessedPages + 1) + " PostBulkDocuments response items=" + responseItemsCount + ", ok=" + responseOkCount + ", errors=" + responseErrorCount);
+        }
+        if (debugUserCreationLogsValue === true) {
+            logUserSyncStatus("info", "PostBulkDocuments raw response for page " + (totalProcessedPages + 1) + ": " + responseJson);
         }'
   ↓If_Sync_Reserved_Groups [steps.IfStep-1776185313149]: 
     condition: shouldSyncCurrentPageReservedGroups
@@ -897,6 +990,7 @@ responseTimeout: 600
   ↓Advance_Pagination [steps.SimpleStep-1776185313169]: 
     expression: |
       'totalProcessedPages++;
+      var previousUserPageOffset = currentUserPageOffset;
       var normalizedNextCookie = normalizeOptionalText(nextUserPageCookieValue);
       var ldapUsersProcessedPagesCountValue = parseInteger(ldapUsersProcessedPagesCount, 0);
       lastUsersHasMorePagesValue = parseBoolean(usersHasMorePagesRaw, false);
@@ -904,6 +998,10 @@ responseTimeout: 600
       lastUserPageWasFull = currentUserPageSize > 0 && pageUsersFromDirectoryCount >= currentUserPageSize;
       usersHasMorePagesValue = lastUsersHasMorePagesValue;
       paginationStopReason = "";
+      if (currentUserPageIsDuplicate) {
+          usersHasMorePagesValue = false;
+          paginationStopReason = "duplicate LDAP page detected";
+      }
       if (remainingUsersLimit > 0) {
           remainingUsersLimit -= pageUsersFromDirectoryCount;
           if (remainingUsersLimit <= 0) {
@@ -913,6 +1011,10 @@ responseTimeout: 600
           }
       }
       currentUserPageOffset += pageUsersFromDirectoryCount;
+      if (usersHasMorePagesValue && currentUserPageOffset === previousUserPageOffset) {
+          usersHasMorePagesValue = false;
+          paginationStopReason = "pagination did not advance";
+      }
       
       if (usersHasMorePagesValue) {
           if (normalizedNextCookie === "" || normalizedNextCookie === currentUserPageCookie) {
@@ -981,6 +1083,11 @@ responseTimeout: 600
         skippedUsersCount: totalSkippedUsersCount,
         filteredOutUsersCount: totalFilteredOutUsersCount,
         shouldWriteToForms: shouldWriteToFormsAny,
+        formsWriteAttemptsCount: formsWriteAttemptsCount,
+        formsWriteAttemptedDocumentsCount: formsWriteAttemptedDocumentsCount,
+        formsWriteResponseDocumentsCount: formsWriteResponseDocumentsCount,
+        formsWriteOkDocumentsCount: formsWriteOkDocumentsCount,
+        formsWriteErrorDocumentsCount: formsWriteErrorDocumentsCount,
         shouldSyncReservedGroups: shouldSyncReservedGroupsAny,
         shouldClearCache: shouldClearCache
     };
@@ -1023,6 +1130,21 @@ responseTimeout: 600
   ↓shouldWriteToForms [steps.ElementStep-1774272301060]: 
     expression: syncSummary.shouldWriteToForms
     nodeName: shouldWriteToForms
+  ↓formsWriteAttemptsCount [steps.ElementStep-1780568091405]: 
+    expression: syncSummary.formsWriteAttemptsCount
+    nodeName: formsWriteAttemptsCount
+  ↓formsWriteAttemptedDocumentsCount [steps.ElementStep-1780568091437]: 
+    expression: syncSummary.formsWriteAttemptedDocumentsCount
+    nodeName: formsWriteAttemptedDocumentsCount
+  ↓formsWriteResponseDocumentsCount [steps.ElementStep-1780568091465]: 
+    expression: syncSummary.formsWriteResponseDocumentsCount
+    nodeName: formsWriteResponseDocumentsCount
+  ↓formsWriteOkDocumentsCount [steps.ElementStep-1780568091488]: 
+    expression: syncSummary.formsWriteOkDocumentsCount
+    nodeName: formsWriteOkDocumentsCount
+  ↓formsWriteErrorDocumentsCount [steps.ElementStep-1780568091529]: 
+    expression: syncSummary.formsWriteErrorDocumentsCount
+    nodeName: formsWriteErrorDocumentsCount
   ↓shouldSyncReservedGroups [steps.ElementStep-1774272301062]: 
     expression: syncSummary.shouldSyncReservedGroups
     nodeName: shouldSyncReservedGroups
