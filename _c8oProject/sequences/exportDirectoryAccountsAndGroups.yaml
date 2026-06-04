@@ -212,6 +212,21 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     	return normalized === "null" || normalized === "undefined" ? "" : normalized;
     };
     
+    var firstConfiguredSymbolValue = function (symbolNames) {
+    	for (var i = 0; i < symbolNames.length; i++) {
+    		try {
+    			var value = Engine.theApp.databaseObjectsManager.symbolsGetValue(symbolNames[i]);
+    			value = normalizeOptionalText(value);
+    			if (value !== "") {
+    				return value;
+    			}
+    		}
+    		catch (e) {
+    		}
+    	}
+    	return "";
+    };
+    
     var isLdapFilter = function (value) {
     	var filter = "" + value;
     	return filter.length >= 3 && filter.charAt(0) === "(" && filter.charAt(filter.length - 1) === ")";
@@ -632,7 +647,10 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     	return result;
     };
     
-    var searchLogin = adminUser;
+    var searchLogin = normalizeOptionalText(adminUser);
+    if (searchLogin === "") {
+    	searchLogin = firstConfiguredSymbolValue(["lib_LDAP.adminUser", "lib_UserManager.adminUser"]);
+    }
     var searchPassword = adminPassword;
     var includeUsersValue = parseBoolean(includeUsers, true);
     var includeGroupsValue = parseBoolean(includeGroups, false);
