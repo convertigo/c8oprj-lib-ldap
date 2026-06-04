@@ -591,7 +591,9 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     				if (searchResult == null) {
     					break;
     				}
-    				var shouldCollectEntry = !autoPageValue || seenCount >= normalizedPageOffset;
+    				var shouldCollectEntry = (!autoPageValue || seenCount >= normalizedPageOffset)
+    					&& (collectedLimit <= 0 || result.returnedCount < collectedLimit)
+    					&& (countLimit <= 0 || result.returnedCount < countLimit);
     				seenCount++;
     				if (!shouldCollectEntry) {
     					continue;
@@ -634,9 +636,6 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     				}
     				if (emitEntriesXml && targetNode != null) {
     					appendEntry(targetNode, entry, emitAttributesJson);
-    				}
-    				if ((collectedLimit > 0 && result.returnedCount >= collectedLimit) || (countLimit > 0 && result.returnedCount >= countLimit)) {
-    					break;
     				}
     			}
     			if (searchResults != null) {
