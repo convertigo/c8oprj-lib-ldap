@@ -417,6 +417,21 @@ responseTimeout: 600
     var skippedUsersJSON = "[]";
     var syncSummaryJSON = "{}";
     var syncSummary = {};'
+↓Normalize_Dry_Run [steps.SimpleStep-1781254251697]:
+  expression: |
+    'var normalizeDryRunValue = function(value) {
+        var normalized = normalizeOptionalText(value).toLowerCase();
+        return normalized === "true" || normalized === "1" || normalized === "yes";
+    };
+    dryRunValue = normalizeDryRunValue(dryRun) || normalizeDryRunValue(dryRunValue);
+    var rawDryRunType = "";
+    try {
+        rawDryRunType = dryRun !== null && dryRun !== undefined && dryRun.getClass !== undefined ? "" + dryRun.getClass().getName() : typeof dryRun;
+    }
+    catch (e) {
+        rawDryRunType = typeof dryRun;
+    }
+    logUserSyncStatus("info", "dryRun normalized to " + dryRunValue + " from " + rawDryRunType + " value=\"" + normalizeOptionalText(dryRun) + "\"");'
 ↓Force_Directory_Groups [steps.SimpleStep-1780072246809]: 
   expression: includeDirectoryGroupsValue = true;
 ↓Bulk_Merge_Rules_JSON [steps.ElementStep-1774272301036]: 
@@ -859,7 +874,7 @@ responseTimeout: 600
         expression: formsDocumentAcls[index]
         nodeName: acl
   ↓If_Write_To_Forms [steps.IfStep-1776185313141]: 
-    condition: shouldWriteCurrentPageToForms
+    condition: normalizeDryRunValue(dryRun) !== true && normalizeDryRunValue(dryRunValue) !== true && shouldWriteCurrentPageToForms
     ↓Call_Transaction [steps.TransactionStep-1776185313143]: 
       sourceTransaction: lib_LDAP.c8oforms_fs.PostBulkDocuments
       ↓_use_json_base [variables.StepVariable-1776185313145]: 
@@ -955,7 +970,7 @@ responseTimeout: 600
             logUserSyncStatus("info", "PostBulkDocuments raw response for page " + (totalProcessedPages + 1) + ": " + responseJson);
         }'
   ↓If_Sync_Reserved_Groups [steps.IfStep-1776185313149]: 
-    condition: shouldSyncCurrentPageReservedGroups
+    condition: normalizeDryRunValue(dryRun) !== true && normalizeDryRunValue(dryRunValue) !== true && shouldSyncCurrentPageReservedGroups
     ↓Log_Group_Mappings_Payload [steps.SimpleStep-1780500000001]: 
       expression: 'if (debugUserCreationLogsValue === true) { logUserSync("info", "groupMappings payload for page " + (totalProcessedPages + 1) + ": " + JSON.stringify(groupMappings)); }'
     ↓Reserved_Groups [steps.XMLComplexStep-1776185313151]: 
