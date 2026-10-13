@@ -537,7 +537,7 @@ responseTimeout: 3600
     // Reads every directory user once, on one connection, with LDAP paged results.
     // The import keeps what was read when the search is interrupted; the reconciliation requires complete=true.
     var readDirectorySnapshot = function() {
-        var snapshot = { entries: [], complete: false, stopReason: "", pagesCount: 0, referralsSkipped: false };
+        var snapshot = { entries: [], complete: false, stopReason: "", pagesCount: 0, referralsSkipped: false, duplicateEntriesCount: 0 };
         var attributeNames = uniqueStringValues(toValueList(userReturnedAttributes));
         if (attributeNames.length === 0) {
             attributeNames = ["distinguishedName", "cn", "sAMAccountName", "uid", "userPrincipalName", "displayName", "givenName", "sn", "mail"];
@@ -565,11 +565,15 @@ responseTimeout: 3600
             searchControls.setTimeLimit(timeLimitValue > 0 ? timeLimitValue : 0);
             searchControls.setCountLimit(0);
             var cookie = null;
-            var seenCookies = {};
+            // Some servers (389 Directory Server) return the same cookie for every page of a search:
+            // guard against a stuck search with the entries instead, ignoring duplicates.
+            var seenDistinguishedNames = {};
+            var pagesWithoutNewEntries = 0;
             do {
                 ldapContext.setRequestControls(createPagedControls(cookie));
                 searchResults = ldapContext.search(searchBase, effectiveFilter, searchControls);
                 snapshot.pagesCount++;
+                var pageNewEntries = 0;
                 while (hasMoreResults(searchResults, snapshot)) {
                     var searchResult = searchResults.next();
                     var resultAttributes = searchResult.getAttributes();
@@ -587,6 +591,13 @@ responseTimeout: 3600
                             attributes.distinguishedName = [distinguishedNameValue];
                         }
                     }
+                    var distinguishedNameKey = "dn:" + normalizeDnKey(distinguishedNameValue);
+                    if (distinguishedNameValue !== "" && seenDistinguishedNames[distinguishedNameKey]) {
+                        snapshot.duplicateEntriesCount++;
+                        continue;
+                    }
+                    seenDistinguishedNames[distinguishedNameKey] = true;
+                    pageNewEntries++;
                     snapshot.entries.push({
                         distinguishedName: distinguishedNameValue,
                         accountName: firstSnapshotValue(attributes, ["sAMAccountName", "uid", "cn"]),
@@ -607,13 +618,10 @@ responseTimeout: 3600
                     snapshot.stopReason = "LDAP did not confirm the paged search";
                     return snapshot;
                 }
-                if (cookie.length > 0) {
-                    var cookieKey = "cookie:" + java.util.Base64.getEncoder().encodeToString(cookie);
-                    if (seenCookies[cookieKey]) {
-                        snapshot.stopReason = "LDAP returned a repeated page cookie";
-                        return snapshot;
-                    }
-                    seenCookies[cookieKey] = true;
+                pagesWithoutNewEntries = pageNewEntries > 0 ? 0 : pagesWithoutNewEntries + 1;
+                if (cookie.length > 0 && pagesWithoutNewEntries >= 3) {
+                    snapshot.stopReason = "LDAP paged search did not advance (" + pagesWithoutNewEntries + " pages without new entries)";
+                    return snapshot;
                 }
                 keepContextAlive();
                 logUserSyncStatus("info", "LDAP directory read: " + snapshot.entries.length + " entries after " + snapshot.pagesCount + " page(s)");
@@ -695,11 +703,20 @@ responseTimeout: 3600
             searchControls.setReturningAttributes(createStringArray(uniqueStringValues(groupDisplayAttributeNames.concat([groupMemberAttributeValue]))));
             searchControls.setCountLimit(0);
             var cookie = null;
+            var seenGroupDistinguishedNames = {};
+            var groupPagesWithoutNewEntries = 0;
             do {
                 ldapContext.setRequestControls(createPagedControls(cookie));
                 searchResults = ldapContext.search(groupsBasePathValue, groupSearchFilterValue, searchControls);
+                var groupPageNewEntries = 0;
                 while (hasMoreResults(searchResults, {})) {
                     var searchResult = searchResults.next();
+                    var groupDistinguishedNameKey = "dn:" + normalizeDnKey(searchResult.getNameInNamespace());
+                    if (seenGroupDistinguishedNames[groupDistinguishedNameKey]) {
+                        continue;
+                    }
+                    seenGroupDistinguishedNames[groupDistinguishedNameKey] = true;
+                    groupPageNewEntries++;
                     var groupAttributes = searchResult.getAttributes();
                     var groupName = firstAttributeValueFromAttributes(groupAttributes, groupDisplayAttributeNames);
                     if (groupName === "") {
@@ -716,6 +733,10 @@ responseTimeout: 3600
                 cookie = readPagedCookie(ldapContext);
                 if (cookie === null) {
                     throw new Error("LDAP did not confirm the paged group search");
+                }
+                groupPagesWithoutNewEntries = groupPageNewEntries > 0 ? 0 : groupPagesWithoutNewEntries + 1;
+                if (cookie.length > 0 && groupPagesWithoutNewEntries >= 3) {
+                    throw new Error("LDAP paged group search did not advance");
                 }
                 keepContextAlive();
             } while (cookie.length > 0);
@@ -1717,6 +1738,7 @@ responseTimeout: 3600
         directoryEntriesCount: directorySnapshot.entries.length,
         directoryReadComplete: directorySnapshot.complete,
         directoryReadStopReason: directorySnapshot.stopReason,
+        directoryDuplicateEntriesCount: directorySnapshot.duplicateEntriesCount || 0,
         groupLookupMode: groupLookupModeValue,
         fullSyncGrpDelegationEnabled: fullSyncGrpDelegationEnabled,
         protectedGroupMappingsSkippedCount: protectedGroupMappingsSkippedCount,
