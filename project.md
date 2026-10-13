@@ -1,7 +1,74 @@
 
 # ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/core/images/project_color_16x16.png?raw=true "Project") lib_LDAP
 
-Mashup Sequencer project
+Synchronizes the users of an LDAP or Active Directory directory into C8Oforms: one Forms user profile and one personal group per user, plus the memberships of selected directory groups. Optionally hides the profiles of users who left the directory.
+
+The synchronization is the `syncDirectoryUsersToForms` sequence. It is Private: call it from another sequence, for example a scheduled one, and preview it first with `dryRun=true`.
+
+## Configuration
+
+The connection settings are the ones of the C8Oforms LDAP login (lib_UserManager symbols). Everything else is driven by `lib_LDAP.*` symbols, or by the sequence variables when called with parameters.
+
+| symbol | default | usage |
+|--------|---------|-------|
+| lib_UserManager.ldapServer | | `ldap://host:port` or `ldaps://host:port` |
+| lib_UserManager.adminUser | | service account DN used to bind; its password is the ciphered `adminPassword` variable, aligned with `lib_UserManager.adminPassword.secret` |
+| lib_UserManager.ldapBasePath | | base DN of the users |
+| lib_UserManager.LDAP_USER_ID_ATTRIBUTE | uid | login attribute (`sAMAccountName` for Active Directory) |
+| lib_UserManager.ldapBasePathGroup | ldapBasePath | base DN of the groups, also used by the login |
+| lib_UserManager.LDAP_GROUP_OBJECT_CLASS | group | object class of the groups when `lib_LDAP.groupSearchFilter` is empty |
+| lib_UserManager.LDAP_GROUP_DISPLAY_ATTRIBUTE | cn | group attribute giving the Forms group name (`ad:<name>`) |
+| C8Oforms.LDAP_AD_Casesentsitive | true | `false` lowercases logins and personal groups |
+| lib_LDAP.userSearchFilter | `(&(objectCategory=person)(objectClass=user))` | LDAP filter of the users to synchronize |
+| lib_LDAP.userExclusionFilter | | LDAP filter of the users to leave out |
+| lib_LDAP.userAccountNamePattern | | regular expression the login must match (case-insensitive) |
+| lib_LDAP.userDistinguishedNameMarkers | | only keep users whose DN contains one of these comma-separated values |
+| lib_LDAP.userExpiryAttribute | | exit date attribute; users whose date is before today are left out |
+| lib_LDAP.userExpiryDateFormat | dd/MM/yyyy | Java SimpleDateFormat pattern of the exit date |
+| lib_LDAP.userExpiryGraceDays | 0 | days a user is kept after the exit date |
+| lib_LDAP.groupSearchFilter | | filter of the groups to map, e.g. `(&(objectClass=groupOfUniqueNames)(\|(cn=GROUP_A)(cn=GROUP_B)))` |
+| lib_LDAP.groupMemberAttribute | uniqueMember | `member` for groupOfNames or Active Directory |
+| lib_LDAP.groupLookupMode | preload | `perUser` runs one LDAP search per user (slow on large directories) |
+| lib_LDAP.reconcileAbsentUsers | false | hide the profiles of users who are no longer selected |
+| lib_LDAP.userMailAttributes, userDisplayNameAttributes, userGivenNameAttributes, userSurnameAttributes | mail, displayName..., givenName, sn | attributes used to fill the Forms profile |
+| lib_LDAP.debugUserCreationLogs | false | per-user logs |
+
+In the user and group filters, `{{today}}` (yyyyMMdd) or `{{today:FORMAT}}` is replaced by the current date. In a symbols file, prefer `[0-9]` to `\d` in regular expressions, since backslashes must be doubled there.
+
+Example for an OpenLDAP directory whose exit dates are stored as text:
+
+```
+lib_UserManager.LDAP_USER_ID_ATTRIBUTE=uid
+lib_UserManager.ldapBasePathGroup=ou=MyApp,ou=applications,dc=example,dc=org
+lib_LDAP.userSearchFilter=(&(objectClass=inetOrgPerson)(mail=*))
+lib_LDAP.userAccountNamePattern=^(AB[0-9]{3})[^TG]
+lib_LDAP.userExpiryAttribute=exitDate
+lib_LDAP.userExpiryDateFormat=dd/MM/yyyy
+lib_LDAP.groupSearchFilter=(&(objectClass=groupOfUniqueNames)(|(cn=APP_USERS)(cn=APP_ADMINS)))
+lib_LDAP.groupMemberAttribute=uniqueMember
+```
+
+## How the synchronization works
+
+1. The users are read once, with LDAP paged results on one connection (`pageSize`, 500 by default). The read is flagged incomplete when the server stops it (size or time limit, missing paged response, referrals).
+2. The DN markers, the login pattern and the exit date are applied to each entry.
+3. The groups matching `groupSearchFilter` are read once and their members are matched in memory, including Active Directory ranged attributes (`member;range=...`).
+4. For each batch of users, the profiles `C8Oreserved_<login>` (provider `ad`, mail, display name, owner) are written to `c8oforms_fs`, then the personal group and the `ad:<group>` memberships through `lib_FullSyncGrp.SetUserInGroupBulk`.
+5. When `reconcileAbsentUsers=true`, the reconciliation runs (see below).
+
+The response holds a `summary` and a `syncSummaryJSONSTR` with the counters: directory entries, read completeness, filtered, expired and unparseable dates, written documents and errors, preloaded groups, membership errors.
+
+## Reconciliation
+
+Disabled by default. When enabled, every profile of the configured provider that is not selected by the directory read is hidden (`c8o_view_type_users=false`, `ldap_sync_disabled=true`) and its group memberships are removed; the profile document is kept. A profile selected again is reactivated and its directory groups are recreated, manual Forms groups are not.
+
+It is refused, without any change, when the directory read is incomplete or empty, when `countLimit` is set, or when users have no login. Profiles whose id only differs by case from a directory user, or whose identity is inconsistent, are left untouched and reported. Run it with `dryRun=true` first and check the `disabled` list.
+
+## Compatibility
+
+Works with lib_UserManager and lib_FullSyncGrp 8.0.0.19 or later, public or security builds. When the lib_FullSyncGrp group delegation is enabled (`lib.fullsyncgrp.delegation.adminGroups`), an unauthenticated synchronization skips the memberships of protected groups and the reconciliation never removes them; both are reported.
+
+`exportDirectoryAccountsAndGroups` and `searchLDAP` are Private helper sequences.
 
 <details><summary><span style="color:DarkGoldenRod"><i>References</i></span></summary><blockquote><p>
 
