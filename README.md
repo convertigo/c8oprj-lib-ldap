@@ -138,7 +138,7 @@ Exports LDAP or Active Directory user accounts and groups with caller-provided f
 <td>usersBasePath</td><td>Optional LDAP base DN dedicated to user or account extraction. Falls back to ldapBasePath when empty.</td>
 </tr>
 <tr>
-<td>userSearchFilter</td><td>LDAP filter applied to user or account entries</td>
+<td>userSearchFilter</td><td>LDAP filter applied to user or account entries. {{today}} or {{today:FORMAT}} (FORMAT being a Java SimpleDateFormat pattern) is replaced by the current date.</td>
 </tr>
 </table>
 
@@ -175,7 +175,7 @@ Exports LDAP or Active Directory user accounts and groups with caller-provided f
 
 ### syncDirectoryUsersToForms
 
-Synchronizes directory users into Forms user documents and reserved groups.
+Synchronizes directory users into Forms user documents and reserved groups. Works with lib_UserManager and lib_FullSyncGrp 8.0.0.19 or later, public or security builds, and honors lib_FullSyncGrp group delegation.
 
 **variables**
 
@@ -232,13 +232,16 @@ Synchronizes directory users into Forms user documents and reserved groups.
 <td>groupDisplayAttributes</td><td>Comma/newline-separated group attributes used to build the Forms directory group name. Uses the same symbol as lib_UserManager.</td>
 </tr>
 <tr>
-<td>groupLookupCountLimit</td><td>Maximum number of LDAP groups looked up per user. Use 0 for no limit.</td>
+<td>groupLookupCountLimit</td><td>Maximum number of LDAP groups looked up per user in perUser group lookup mode. Use 0 for no limit.</td>
 </tr>
 <tr>
-<td>groupLookupTimeLimit</td><td>LDAP group lookup time limit per user in milliseconds. Use 0 for no limit.</td>
+<td>groupLookupMode</td><td>preload (default) reads the groups matching groupSearchFilter once and resolves memberships in memory; perUser runs one LDAP group search per user, slow for large directories. Default can be driven by symbol lib_LDAP.groupLookupMode.</td>
 </tr>
 <tr>
-<td>groupMemberAttribute</td><td>LDAP group attribute that contains the user distinguishedName. lib_UserManager currently uses uniqueMember in its group lookup.</td>
+<td>groupLookupTimeLimit</td><td>LDAP group lookup time limit per user in milliseconds, in perUser group lookup mode. Use 0 for no limit.</td>
+</tr>
+<tr>
+<td>groupMemberAttribute</td><td>LDAP group attribute that contains the user distinguishedName (uniqueMember for groupOfUniqueNames, member for groupOfNames or Active Directory). lib_UserManager currently uses uniqueMember in its group lookup. Default can be driven by symbol lib_LDAP.groupMemberAttribute.</td>
 </tr>
 <tr>
 <td>groupObjectClass</td><td>LDAP objectClass value identifying directory groups. Uses the same symbol as lib_UserManager.</td>
@@ -247,13 +250,13 @@ Synchronizes directory users into Forms user documents and reserved groups.
 <td>groupsBasePath</td><td>LDAP base DN dedicated to group lookup. Uses the same symbol as lib_UserManager.</td>
 </tr>
 <tr>
-<td>groupSearchFilter</td><td>Advanced override for the LDAP group filter. Leave empty to use lib_UserManager.LDAP_GROUP_OBJECT_CLASS.</td>
+<td>groupSearchFilter</td><td>Advanced override for the LDAP group filter, e.g. (&(objectClass=groupOfUniqueNames)(|(cn=GROUP_A)(cn=GROUP_B))). Leave empty to use lib_UserManager.LDAP_GROUP_OBJECT_CLASS. Supports the {{today}} token. Default can be driven by symbol lib_LDAP.groupSearchFilter.</td>
 </tr>
 <tr>
 <td>includeDirectoryGroups</td><td>Directory group lookup is mandatory. This variable is kept for compatibility but is forced to true by the sequence.</td>
 </tr>
 <tr>
-<td>includeRDN</td><td>Set to true to expose parsed RDN components for each directory entry</td>
+<td>includeRDN</td><td>Kept for compatibility, not used by the synchronization.</td>
 </tr>
 <tr>
 <td>ldapBasePath</td><td>Default LDAP base DN used when usersBasePath is not provided</td>
@@ -262,7 +265,10 @@ Synchronizes directory users into Forms user documents and reserved groups.
 <td>ldapServer</td><td>LDAP server URL in the form ldap(s)://server:port</td>
 </tr>
 <tr>
-<td>pageSize</td><td>Number of directory users requested per export page. Use a value greater than 0. Default 500.</td>
+<td>pageSize</td><td>LDAP paged results size and number of users written to Forms per batch. Use a value greater than 0. Default 500.</td>
+</tr>
+<tr>
+<td>reconcileAbsentUsers</td><td>Set to true to hide Forms profiles of this provider that are missing from a complete directory snapshot, remove their group memberships and reactivate returning users. Refused when the snapshot is incomplete, empty, limited by countLimit or contains users without account identifier. Preview with dryRun=true. Default can be driven by symbol lib_LDAP.reconcileAbsentUsers.</td>
 </tr>
 <tr>
 <td>timeLimit</td><td>LDAP time limit passed to the search. Use 0 for no limit.</td>
@@ -271,13 +277,25 @@ Synchronizes directory users into Forms user documents and reserved groups.
 <td>userAccountNameAttributes</td><td>Comma/newline-separated candidate attributes used to build the Forms login, reserved group id and ACL. Defaults to lib_UserManager.LDAP_USER_ID_ATTRIBUTE.</td>
 </tr>
 <tr>
+<td>userAccountNamePattern</td><td>Optional regular expression, matched case-insensitively against the account identifier (before lowercase normalization). Users that do not match are not synchronized, e.g. ^(AC750|UR[0-9]{3})[^TG]. Prefer [0-9] to backslash escapes, which must be doubled in symbol files. Default can be driven by symbol lib_LDAP.userAccountNamePattern.</td>
+</tr>
+<tr>
 <td>userDisplayNameAttributes</td><td>Comma/newline-separated candidate attributes used as displayName fallback after a computed givenName/surname display name. Custom attributes must also be present in userReturnedAttributes.</td>
 </tr>
 <tr>
 <td>userDistinguishedNameMarkers</td><td>Optional comma/newline-separated distinguishedName markers. When provided, only users whose distinguishedName contains at least one marker are synchronized. Default can be driven by symbol lib_LDAP.userDistinguishedNameMarkers.</td>
 </tr>
 <tr>
-<td>userExclusionFilter</td><td>Optional LDAP filter for directory accounts to exclude from the Forms synchronization. Default can be driven by symbol lib_LDAP.userExclusionFilter.</td>
+<td>userExclusionFilter</td><td>Optional LDAP filter for directory accounts to exclude from the Forms synchronization. Supports the {{today}} token. Default can be driven by symbol lib_LDAP.userExclusionFilter.</td>
+</tr>
+<tr>
+<td>userExpiryAttribute</td><td>Optional attribute holding the user exit date. Users whose date is strictly before today (minus userExpiryGraceDays) are not synchronized and are hidden by the reconciliation; users without a date are kept; unparseable dates are kept and reported in the summary. The date is evaluated at each run. Default can be driven by symbol lib_LDAP.userExpiryAttribute.</td>
+</tr>
+<tr>
+<td>userExpiryDateFormat</td><td>Java SimpleDateFormat pattern of userExpiryAttribute, parsed strictly, e.g. dd/MM/yyyy or yyyyMMddHHmmss. Default can be driven by symbol lib_LDAP.userExpiryDateFormat.</td>
+</tr>
+<tr>
+<td>userExpiryGraceDays</td><td>Number of days a user is still synchronized after the exit date. 0 keeps the user up to and including the exit day. Default can be driven by symbol lib_LDAP.userExpiryGraceDays.</td>
 </tr>
 <tr>
 <td>userGivenNameAttributes</td><td>Comma/newline-separated candidate attributes used as first name for the computed Forms displayName. Custom attributes must also be present in userReturnedAttributes.</td>
@@ -292,7 +310,7 @@ Synchronizes directory users into Forms user documents and reserved groups.
 <td>usersBasePath</td><td>Optional LDAP base DN dedicated to user extraction. Falls back to ldapBasePath when empty.</td>
 </tr>
 <tr>
-<td>userSearchFilter</td><td>LDAP filter applied to the directory accounts to import into Forms. Default can be driven by symbol lib_LDAP.userSearchFilter.</td>
+<td>userSearchFilter</td><td>LDAP filter applied to the directory accounts to import into Forms. {{today}} or {{today:FORMAT}} (FORMAT being a Java SimpleDateFormat pattern) is replaced by the current date, e.g. (|(!(expiry=*))(expiry>={{today:yyyyMMdd}})). Default can be driven by symbol lib_LDAP.userSearchFilter.</td>
 </tr>
 <tr>
 <td>userSurnameAttributes</td><td>Comma/newline-separated candidate attributes used as surname for the computed Forms displayName. Custom attributes must also be present in userReturnedAttributes.</td>

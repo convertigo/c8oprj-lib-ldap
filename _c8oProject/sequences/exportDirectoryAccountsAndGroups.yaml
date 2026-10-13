@@ -232,6 +232,14 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     	return filter.length >= 3 && filter.charAt(0) === "(" && filter.charAt(filter.length - 1) === ")";
     };
     
+    // Replaces {{today}} (yyyyMMdd) or {{today:FORMAT}} (Java SimpleDateFormat pattern) with the current date.
+    var resolveFilterTokens = function (value) {
+    	return ("" + value).replace(/\{\{today(?::([^}]*))?\}\}/g, function (token, format) {
+    		var formatted = "" + new java.text.SimpleDateFormat(format ? "" + format : "yyyyMMdd").format(new java.util.Date());
+    		return formatted.replace(/\\/g, "\\5c").replace(/\*/g, "\\2a").replace(/\(/g, "\\28").replace(/\)/g, "\\29");
+    	});
+    };
+    
     var getConnectionSettings = function (ldapUrl) {
     	var settings = {
     		useSSL: false,
@@ -713,15 +721,15 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
     var timeLimitValue = parseInteger(timeLimit, 0);
     var usersBase = isNotBlank(usersBasePath) ? "" + usersBasePath : (isNotBlank(ldapBasePath) ? "" + ldapBasePath : "");
     var groupsBase = isNotBlank(groupsBasePath) ? "" + groupsBasePath : (isNotBlank(ldapBasePath) ? "" + ldapBasePath : "");
-    var userSearchFilterValue = normalizeOptionalText(userSearchFilter);
+    var userSearchFilterValue = resolveFilterTokens(normalizeOptionalText(userSearchFilter));
     if (!isLdapFilter(userSearchFilterValue)) {
     	userSearchFilterValue = "(&(objectCategory=person)(objectClass=user))";
     }
-    var userExclusionFilterValue = normalizeOptionalText(userExclusionFilter);
+    var userExclusionFilterValue = resolveFilterTokens(normalizeOptionalText(userExclusionFilter));
     if (!isLdapFilter(userExclusionFilterValue)) {
     	userExclusionFilterValue = "";
     }
-    var groupSearchFilterValue = normalizeOptionalText(groupSearchFilter);
+    var groupSearchFilterValue = resolveFilterTokens(normalizeOptionalText(groupSearchFilter));
     if (!isLdapFilter(groupSearchFilterValue)) {
     	groupSearchFilterValue = "(objectCategory=group)";
     }
@@ -830,7 +838,7 @@ comment: Exports LDAP or Active Directory user accounts and groups with caller-p
 ↓groupsBasePath [variables.RequestableVariable-1774190359451]: 
   comment: Optional LDAP base DN dedicated to group extraction. Falls back to ldapBasePath when empty.
 ↓userSearchFilter [variables.RequestableVariable-1774190359453]: 
-  comment: LDAP filter applied to user or account entries
+  comment: LDAP filter applied to user or account entries. {{today}} or {{today:FORMAT}} (FORMAT being a Java SimpleDateFormat pattern) is replaced by the current date.
   value: (&(objectCategory=person)(objectClass=user))
 ↓userExclusionFilter [variables.RequestableVariable-1774190579000]: 
   comment: Optional LDAP filter for user accounts to exclude, for example (|(sAMAccountName=krbtgt)(sAMAccountName=svc_*))

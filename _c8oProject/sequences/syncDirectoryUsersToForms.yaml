@@ -1,6 +1,6 @@
 accessibility: Private
-comment: Synchronizes directory users into Forms user documents and reserved groups.
-responseTimeout: 600
+comment: Synchronizes directory users into Forms user documents and reserved groups. Works with lib_UserManager and lib_FullSyncGrp 8.0.0.19 or later, public or security builds, and honors lib_FullSyncGrp group delegation.
+responseTimeout: 3600
 ↓Input_variables [steps.InputVariablesStep-1774272301000]: 
 ↓Init_Pagination [steps.SimpleStep-1776185313071]: 
   expression: |
@@ -69,6 +69,13 @@ responseTimeout: 600
     var isLdapFilter = function(value) {
         var filter = normalizeOptionalText(value);
         return filter.length >= 3 && filter.charAt(0) === "(" && filter.charAt(filter.length - 1) === ")";
+    };
+    // Replaces {{today}} (yyyyMMdd) or {{today:FORMAT}} (Java SimpleDateFormat pattern) with the current date.
+    var resolveFilterTokens = function(value) {
+        return normalizeOptionalText(value).replace(/\{\{today(?::([^}]*))?\}\}/g, function(token, format) {
+            var formatted = "" + new java.text.SimpleDateFormat(format ? "" + format : "yyyyMMdd").format(new java.util.Date());
+            return formatted.replace(/\\/g, "\\5c").replace(/\*/g, "\\2a").replace(/\(/g, "\\28").replace(/\)/g, "\\29");
+        });
     };
     var uniqueStringValues = function(values) {
         var result = [];
@@ -275,7 +282,7 @@ responseTimeout: 600
     if (groupObjectClassValue === "") {
         groupObjectClassValue = "group";
     }
-    var groupSearchFilterValue = normalizeOptionalText(groupSearchFilter);
+    var groupSearchFilterValue = resolveFilterTokens(groupSearchFilter);
     if (!isLdapFilter(groupSearchFilterValue)) {
         groupSearchFilterValue = "(objectClass=" + escapeLdapFilterValue(groupObjectClassValue) + ")";
     }
@@ -416,8 +423,460 @@ responseTimeout: 600
     var formsDocumentAcls = [];
     var skippedUsersJSON = "[]";
     var syncSummaryJSON = "{}";
-    var syncSummary = {};'
-↓Normalize_Dry_Run [steps.SimpleStep-1781254251697]:
+    var syncSummary = {};
+    var resolvedUserSearchFilterValue = resolveFilterTokens(userSearchFilter);
+    var resolvedUserExclusionFilterValue = resolveFilterTokens(userExclusionFilter);
+    var userAccountNamePatternValue = normalizeOptionalText(userAccountNamePattern);
+    var userAccountNameRegExp = null;
+    if (userAccountNamePatternValue !== "") {
+        try {
+            userAccountNameRegExp = new RegExp(userAccountNamePatternValue, "i");
+        }
+        catch (e) {
+            throw new Error("Invalid userAccountNamePattern \"" + userAccountNamePatternValue + "\": " + e);
+        }
+    }
+    var matchesAccountNamePattern = function(accountName) {
+        return userAccountNameRegExp === null || userAccountNameRegExp.test("" + accountName);
+    };
+    var reconcileAbsentUsersValue = parseBoolean(reconcileAbsentUsers, false);
+    var reconciliationReport = { enabled: reconcileAbsentUsersValue };
+    var reconciliationWroteDocuments = false;
+    var groupLookupModeValue = normalizeOptionalText(groupLookupMode).toLowerCase() === "peruser" ? "perUser" : "preload";
+    var preloadedGroupsByMember = null;
+    var preloadedDirectoryGroupsCount = 0;
+    var preloadedGroupMembershipsCount = 0;
+    var directorySnapshot = { entries: [], complete: false, stopReason: "not read", pagesCount: 0 };
+    var directoryPageUsers = null;
+    // Normalizes a DN for in-memory membership matching (case, spaces around separators, optional uniqueMember UID).
+    var normalizeDnKey = function(dn) {
+        return normalizeOptionalText(dn).replace(/#''[01]*''B$/, "").replace(/\s*([,=+])\s*/g, "$1").toLowerCase();
+    };
+    var keepContextAlive = function() {
+        context.lastAccessTime = java.lang.System.currentTimeMillis();
+    };
+    var toValueList = function(value) {
+        var values = [];
+        if (value === null || value === undefined) {
+            return values;
+        }
+        if (typeof value === "string" || value instanceof java.lang.String) {
+            return splitStringValues(value);
+        }
+        if (typeof value.length === "number") {
+            for (var i = 0; i < value.length; i++) {
+                if (value[i] !== null && value[i] !== undefined) {
+                    values = values.concat(splitStringValues(value[i]));
+                }
+            }
+            return values;
+        }
+        if (value.iterator !== undefined) {
+            var iterator = value.iterator();
+            while (iterator.hasNext()) {
+                values = values.concat(splitStringValues(iterator.next()));
+            }
+            return values;
+        }
+        return splitStringValues(value);
+    };
+    var firstSnapshotValue = function(attributes, names) {
+        for (var i = 0; i < names.length; i++) {
+            var values = attributes[names[i]];
+            if (values) {
+                for (var j = 0; j < values.length; j++) {
+                    var value = normalizeOptionalText(values[j]);
+                    if (value !== "") {
+                        return value;
+                    }
+                }
+            }
+        }
+        return "";
+    };
+    var createPagedControls = function(cookie) {
+        var controls = java.lang.reflect.Array.newInstance(javax.naming.ldap.Control, 1);
+        controls[0] = new javax.naming.ldap.PagedResultsControl(requestedPageSizeValue, cookie, true);
+        return controls;
+    };
+    // Returns the next page cookie, an empty array on the last page, or null when the server did not confirm the paged search.
+    var readPagedCookie = function(ldapContext) {
+        var PagedResultsResponseControl = javax.naming.ldap.PagedResultsResponseControl;
+        var responseControls = ldapContext.getResponseControls();
+        if (responseControls !== null) {
+            for (var c = 0; c < responseControls.length; c++) {
+                var control = responseControls[c];
+                if (control === null) {
+                    continue;
+                }
+                if (!(control instanceof PagedResultsResponseControl) && ("" + control.getID()) === ("" + PagedResultsResponseControl.OID)) {
+                    control = new PagedResultsResponseControl(control.getID(), control.isCritical(), control.getEncodedValue());
+                }
+                if (control instanceof PagedResultsResponseControl) {
+                    var cookie = control.getCookie();
+                    return cookie === null ? java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 0) : cookie;
+                }
+            }
+        }
+        return null;
+    };
+    // Active Directory ends a page with continuation references (PartialResultException) when the base is a domain root:
+    // skip them and keep paging, but flag the read so that the reconciliation does not rely on it.
+    var hasMoreResults = function(searchResults, state) {
+        try {
+            return searchResults.hasMore();
+        }
+        catch (e) {
+            if (isPartialResult(e)) {
+                state.referralsSkipped = true;
+                return false;
+            }
+            throw e;
+        }
+    };
+    // Reads every directory user once, on one connection, with LDAP paged results.
+    // The import keeps what was read when the search is interrupted; the reconciliation requires complete=true.
+    var readDirectorySnapshot = function() {
+        var snapshot = { entries: [], complete: false, stopReason: "", pagesCount: 0, referralsSkipped: false };
+        var attributeNames = uniqueStringValues(toValueList(userReturnedAttributes));
+        if (attributeNames.length === 0) {
+            attributeNames = ["distinguishedName", "cn", "sAMAccountName", "uid", "userPrincipalName", "displayName", "givenName", "sn", "mail"];
+        }
+        if (attributeNames.indexOf("distinguishedName") === -1) {
+            attributeNames.unshift("distinguishedName");
+        }
+        if (userExpiryAttributeValue !== "" && attributeNames.indexOf(userExpiryAttributeValue) === -1) {
+            attributeNames.push(userExpiryAttributeValue);
+        }
+        var searchFilterValue = isLdapFilter(resolvedUserSearchFilterValue) ? resolvedUserSearchFilterValue : "(&(objectCategory=person)(objectClass=user))";
+        var effectiveFilter = isLdapFilter(resolvedUserExclusionFilterValue) ? "(&" + searchFilterValue + "(!" + resolvedUserExclusionFilterValue + "))" : searchFilterValue;
+        var searchBase = normalizeOptionalText(usersBasePath);
+        if (searchBase === "") {
+            searchBase = normalizeOptionalText(ldapBasePath);
+        }
+        var timeLimitValue = parseInteger(timeLimit, 0);
+        var ldapContext = null;
+        var searchResults = null;
+        try {
+            ldapContext = createLdapContext(ldapServer, adminUser, adminPassword);
+            var searchControls = new SearchControls();
+            searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
+            searchControls.setReturningAttributes(createStringArray(attributeNames));
+            searchControls.setTimeLimit(timeLimitValue > 0 ? timeLimitValue : 0);
+            searchControls.setCountLimit(0);
+            var cookie = null;
+            var seenCookies = {};
+            do {
+                ldapContext.setRequestControls(createPagedControls(cookie));
+                searchResults = ldapContext.search(searchBase, effectiveFilter, searchControls);
+                snapshot.pagesCount++;
+                while (hasMoreResults(searchResults, snapshot)) {
+                    var searchResult = searchResults.next();
+                    var resultAttributes = searchResult.getAttributes();
+                    var attributes = {};
+                    for (var a = 0; a < attributeNames.length; a++) {
+                        var values = toAttributeValues(resultAttributes === null ? null : resultAttributes.get(attributeNames[a]));
+                        if (values.length > 0) {
+                            attributes[attributeNames[a]] = values;
+                        }
+                    }
+                    var distinguishedNameValue = firstSnapshotValue(attributes, ["distinguishedName"]);
+                    if (distinguishedNameValue === "") {
+                        distinguishedNameValue = normalizeOptionalText(searchResult.getNameInNamespace());
+                        if (distinguishedNameValue !== "") {
+                            attributes.distinguishedName = [distinguishedNameValue];
+                        }
+                    }
+                    snapshot.entries.push({
+                        distinguishedName: distinguishedNameValue,
+                        accountName: firstSnapshotValue(attributes, ["sAMAccountName", "uid", "cn"]),
+                        commonName: firstSnapshotValue(attributes, ["cn"]),
+                        displayName: firstSnapshotValue(attributes, ["displayName", "cn", "uid", "sAMAccountName"]),
+                        mail: firstSnapshotValue(attributes, ["mail"]),
+                        attributes: attributes
+                    });
+                    if (configuredCountLimitValue > 0 && snapshot.entries.length >= configuredCountLimitValue) {
+                        snapshot.stopReason = "countLimit reached";
+                        return snapshot;
+                    }
+                }
+                searchResults.close();
+                searchResults = null;
+                cookie = readPagedCookie(ldapContext);
+                if (cookie === null) {
+                    snapshot.stopReason = "LDAP did not confirm the paged search";
+                    return snapshot;
+                }
+                if (cookie.length > 0) {
+                    var cookieKey = "cookie:" + java.util.Base64.getEncoder().encodeToString(cookie);
+                    if (seenCookies[cookieKey]) {
+                        snapshot.stopReason = "LDAP returned a repeated page cookie";
+                        return snapshot;
+                    }
+                    seenCookies[cookieKey] = true;
+                }
+                keepContextAlive();
+                logUserSyncStatus("info", "LDAP directory read: " + snapshot.entries.length + " entries after " + snapshot.pagesCount + " page(s)");
+            } while (cookie.length > 0);
+            snapshot.complete = !snapshot.referralsSkipped;
+            snapshot.stopReason = snapshot.referralsSkipped ? "LDAP paged search completed, continuation references (referrals) skipped" : "LDAP paged search completed";
+        }
+        catch (e) {
+            snapshot.stopReason = "LDAP search interrupted: " + e;
+            logUserSyncStatus("error", snapshot.stopReason);
+        }
+        finally {
+            if (searchResults !== null) {
+                try {
+                    searchResults.close();
+                }
+                catch (e1) {
+                }
+            }
+            if (ldapContext !== null) {
+                try {
+                    ldapContext.close();
+                }
+                catch (e2) {
+                }
+            }
+        }
+        return snapshot;
+    };
+    // Reads the groups matching groupSearchFilter once and indexes their members by DN.
+    // Replaces one LDAP search per user. Handles Active Directory ranged attributes (member;range=0-1499).
+    var preloadDirectoryGroups = function() {
+        var byMember = {};
+        var memberAttributeLower = groupMemberAttributeValue.toLowerCase();
+        var pendingRanges = [];
+        var addMembers = function(groupName, values) {
+            for (var v = 0; v < values.length; v++) {
+                var key = "dn:" + normalizeDnKey(values[v]);
+                if (!byMember[key]) {
+                    byMember[key] = [];
+                }
+                if (byMember[key].indexOf(groupName) === -1) {
+                    byMember[key].push(groupName);
+                    preloadedGroupMembershipsCount++;
+                }
+            }
+        };
+        // Returns the last range attribute id read, or null when the member attribute is not ranged.
+        var collectMembers = function(attributes, groupName) {
+            var rangeId = null;
+            if (attributes === null) {
+                return rangeId;
+            }
+            var ids = attributes.getIDs();
+            try {
+                while (ids.hasMore()) {
+                    var id = "" + ids.next();
+                    var lower = id.toLowerCase();
+                    if (lower === memberAttributeLower) {
+                        addMembers(groupName, toAttributeValues(attributes.get(id)));
+                    }
+                    else if (lower.indexOf(memberAttributeLower + ";range=") === 0) {
+                        addMembers(groupName, toAttributeValues(attributes.get(id)));
+                        rangeId = id;
+                    }
+                }
+            }
+            finally {
+                ids.close();
+            }
+            return rangeId;
+        };
+        var ldapContext = null;
+        var searchResults = null;
+        try {
+            ldapContext = createLdapContext(ldapServer, adminUser, adminPassword);
+            var searchControls = new SearchControls();
+            searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
+            searchControls.setReturningAttributes(createStringArray(uniqueStringValues(groupDisplayAttributeNames.concat([groupMemberAttributeValue]))));
+            searchControls.setCountLimit(0);
+            var cookie = null;
+            do {
+                ldapContext.setRequestControls(createPagedControls(cookie));
+                searchResults = ldapContext.search(groupsBasePathValue, groupSearchFilterValue, searchControls);
+                while (hasMoreResults(searchResults, {})) {
+                    var searchResult = searchResults.next();
+                    var groupAttributes = searchResult.getAttributes();
+                    var groupName = firstAttributeValueFromAttributes(groupAttributes, groupDisplayAttributeNames);
+                    if (groupName === "") {
+                        continue;
+                    }
+                    preloadedDirectoryGroupsCount++;
+                    var rangeId = collectMembers(groupAttributes, formsDirectoryGroupPrefixValue + groupName);
+                    if (rangeId !== null && !/-\*$/.test(rangeId)) {
+                        pendingRanges.push({ dn: "" + searchResult.getNameInNamespace(), groupName: formsDirectoryGroupPrefixValue + groupName, rangeId: rangeId });
+                    }
+                }
+                searchResults.close();
+                searchResults = null;
+                cookie = readPagedCookie(ldapContext);
+                if (cookie === null) {
+                    throw new Error("LDAP did not confirm the paged group search");
+                }
+                keepContextAlive();
+            } while (cookie.length > 0);
+            // Ranged values are fetched after the paged search so that no other operation interleaves with its pages.
+            ldapContext.setRequestControls(null);
+            for (var p = 0; p < pendingRanges.length; p++) {
+                var pendingRangeId = pendingRanges[p].rangeId;
+                while (pendingRangeId !== null && !/-\*$/.test(pendingRangeId)) {
+                    var rangeEnd = parseInt(pendingRangeId.substring(pendingRangeId.lastIndexOf("-") + 1), 10);
+                    var rangeAttributes = ldapContext.getAttributes(new javax.naming.ldap.LdapName(pendingRanges[p].dn), createStringArray([groupMemberAttributeValue + ";range=" + (rangeEnd + 1) + "-*"]));
+                    pendingRangeId = collectMembers(rangeAttributes, pendingRanges[p].groupName);
+                }
+            }
+        }
+        finally {
+            if (searchResults !== null) {
+                try {
+                    searchResults.close();
+                }
+                catch (e1) {
+                }
+            }
+            if (ldapContext !== null) {
+                try {
+                    ldapContext.close();
+                }
+                catch (e2) {
+                }
+            }
+        }
+        return byMember;
+    };
+    var resolveDirectoryGroupsForUser = function(userDn) {
+        if (preloadedGroupsByMember !== null) {
+            var groups = preloadedGroupsByMember["dn:" + normalizeDnKey(userDn)];
+            return groups ? groups.slice(0) : [];
+        }
+        return readDirectoryGroupsForUser(userDn);
+    };
+    var userExpiryAttributeValue = normalizeOptionalText(userExpiryAttribute);
+    var userExpiryDateFormatValue = normalizeOptionalText(userExpiryDateFormat);
+    if (userExpiryDateFormatValue === "") {
+        userExpiryDateFormatValue = "dd/MM/yyyy";
+    }
+    var userExpiryGraceDaysValue = parseInteger(userExpiryGraceDays, 0);
+    if (userExpiryGraceDaysValue < 0) {
+        userExpiryGraceDaysValue = 0;
+    }
+    var userExpiryParser = null;
+    var userExpiryCutoff = 0;
+    if (userExpiryAttributeValue !== "") {
+        try {
+            userExpiryParser = new java.text.SimpleDateFormat(userExpiryDateFormatValue);
+            userExpiryParser.setLenient(false);
+        }
+        catch (e) {
+            throw new Error("Invalid userExpiryDateFormat \"" + userExpiryDateFormatValue + "\": " + e);
+        }
+        // Exit dates strictly before today (minus the grace days) are expired: a user is kept on the exit day itself.
+        var expiryCalendar = java.util.Calendar.getInstance();
+        expiryCalendar.set(java.util.Calendar.HOUR_OF_DAY, 0);
+        expiryCalendar.set(java.util.Calendar.MINUTE, 0);
+        expiryCalendar.set(java.util.Calendar.SECOND, 0);
+        expiryCalendar.set(java.util.Calendar.MILLISECOND, 0);
+        expiryCalendar.add(java.util.Calendar.DATE, -userExpiryGraceDaysValue);
+        userExpiryCutoff = expiryCalendar.getTime().getTime();
+    }
+    var expiredUsersCount = 0;
+    var unparseableExpiryDatesCount = 0;
+    var unparseableExpiryDates = [];
+    // Returns { status: "active" | "expired" | "unparseable", value }. Users without exit date are active.
+    var getExpiryStatus = function(entry) {
+        if (userExpiryParser === null) {
+            return { status: "active", value: "" };
+        }
+        var rawValue = getFirstAttributeValue(entry, userExpiryAttributeValue);
+        if (rawValue === "") {
+            return { status: "active", value: "" };
+        }
+        var position = new java.text.ParsePosition(0);
+        var exitDate = userExpiryParser.parse(rawValue, position);
+        if (exitDate === null || position.getIndex() !== rawValue.length) {
+            return { status: "unparseable", value: rawValue };
+        }
+        return { status: exitDate.getTime() < userExpiryCutoff ? "expired" : "active", value: rawValue };
+    };
+    // lib_FullSyncGrp delegation (8.0.0.19 and security versions): enabled when lib.fullsyncgrp.delegation.adminGroups is a non-empty array.
+    // Older versions do not define the symbol, so delegation is considered disabled and nothing changes.
+    var fullSyncGrpDelegationEnabled = false;
+    try {
+        var delegationSymbol = normalizeOptionalText(com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue("lib.fullsyncgrp.delegation.adminGroups"));
+        if (delegationSymbol !== "") {
+            try {
+                var delegationAdminGroups = JSON.parse(delegationSymbol);
+                fullSyncGrpDelegationEnabled = !Array.isArray(delegationAdminGroups) || delegationAdminGroups.length > 0;
+            }
+            catch (e) {
+                // An invalid value makes lib_FullSyncGrp reject writes: stay conservative.
+                fullSyncGrpDelegationEnabled = true;
+            }
+        }
+    }
+    catch (e) {
+        fullSyncGrpDelegationEnabled = false;
+    }
+    var hasAuthenticatedUser = function() {
+        try {
+            return normalizeOptionalText(context.getAuthenticatedUser()) !== "";
+        }
+        catch (e) {
+            return false;
+        }
+    };
+    var protectedGroupCache = {};
+    // Returns { groupName: true } for the groups protected by a non-empty administrableBy attribute (or an invalid one).
+    var findProtectedGroups = function(groups) {
+        var result = {};
+        if (!fullSyncGrpDelegationEnabled || groups.length === 0) {
+            return result;
+        }
+        var unknown = [];
+        for (var g = 0; g < groups.length; g++) {
+            if (protectedGroupCache["group:" + groups[g]] === undefined && unknown.indexOf(groups[g]) === -1) {
+                unknown.push(groups[g]);
+            }
+        }
+        var fullSyncClient = com.twinsoft.convertigo.engine.Engine.theApp.couchDbManager.getFullSyncClient();
+        for (var offset = 0; offset < unknown.length; offset += 200) {
+            var chunk = unknown.slice(offset, offset + 200);
+            var keys = [];
+            for (var k = 0; k < chunk.length; k++) {
+                keys.push("" + org.apache.commons.codec.digest.DigestUtils.sha256Hex(new java.lang.String("groupAttributes:" + chunk[k])));
+            }
+            var query = new java.util.HashMap();
+            query.put("include_docs", "true");
+            var response = JSON.parse("" + fullSyncClient.postAllDocs("c8ofullsyncgrp", query, new org.codehaus.jettison.json.JSONArray(JSON.stringify(keys))));
+            if (response.error || !Array.isArray(response.rows) || response.rows.length !== chunk.length) {
+                throw new Error("Cannot read lib_FullSyncGrp group attributes");
+            }
+            for (var r = 0; r < chunk.length; r++) {
+                var attributesDoc = response.rows[r] ? response.rows[r].doc : null;
+                var isProtected = false;
+                if (attributesDoc && attributesDoc.attributes && attributesDoc.attributes.administrableBy !== undefined && attributesDoc.attributes.administrableBy !== null) {
+                    var administrableBy = attributesDoc.attributes.administrableBy;
+                    isProtected = !Array.isArray(administrableBy) || administrableBy.length > 0;
+                }
+                protectedGroupCache["group:" + chunk[r]] = isProtected;
+            }
+        }
+        for (var p = 0; p < groups.length; p++) {
+            if (protectedGroupCache["group:" + groups[p]] === true) {
+                result[groups[p]] = true;
+            }
+        }
+        return result;
+    };
+    var protectedGroupMappingsSkippedCount = 0;
+    var protectedGroupsSkipped = [];
+    var groupMappingWriteErrorsCount = 0;
+    var groupMappingWriteErrors = [];'
+↓Normalize_Dry_Run [steps.SimpleStep-1781254251697]: 
   expression: |
     'var normalizeDryRunValue = function(value) {
         var normalized = normalizeOptionalText(value).toLowerCase();
@@ -438,210 +897,36 @@ responseTimeout: 600
   expression: bulkMergeRulesValue
   nodeName: bulkMergeRulesJSONSTR
   output: false
+↓Read_Directory [steps.SimpleStep-1790000000008]: 
+  expression: |
+    'directorySnapshot = readDirectorySnapshot();
+    ldapUsersProcessedPagesCount = directorySnapshot.pagesCount;
+    logUserSyncStatus(directorySnapshot.complete ? "info" : "warn", "LDAP directory read finished: entries=" + directorySnapshot.entries.length + ", pages=" + directorySnapshot.pagesCount + ", complete=" + directorySnapshot.complete + ", reason=" + directorySnapshot.stopReason);
+    if (includeDirectoryGroupsValue === true && groupLookupModeValue === "preload" && directorySnapshot.entries.length > 0) {
+        try {
+            preloadedGroupsByMember = preloadDirectoryGroups();
+            logUserSyncStatus("info", "directory groups preloaded: groups=" + preloadedDirectoryGroupsCount + ", memberships=" + preloadedGroupMembershipsCount);
+        }
+        catch (e) {
+            preloadedGroupsByMember = null;
+            preloadedDirectoryGroupsCount = 0;
+            preloadedGroupMembershipsCount = 0;
+            groupLookupModeValue = "perUser";
+            logUserSyncStatus("warn", "directory group preload failed, falling back to one LDAP lookup per user: " + e);
+        }
+    }
+    currentUserPageOffset = 0;
+    currentUserPageSize = requestedPageSizeValue;
+    usersHasMorePagesValue = true;'
 ↓Paged_Sync [steps.DoWhileStep-1776185313079]: 
   condition: usersHasMorePagesValue === true && currentUserPageSize > 0
-  ↓Current_User_Page_Size [steps.ElementStep-1776185313081]: 
-    expression: currentUserPageSize
-    nodeName: currentUserPageSize
-    output: false
-  ↓Current_User_Page_Cookie [steps.ElementStep-1776185313083]: 
-    expression: currentUserPageCookie
-    nodeName: currentUserPageCookie
-    output: false
-  ↓Current_User_Page_Offset [steps.ElementStep-1780565717095]: 
-    expression: currentUserPageOffset
-    nodeName: currentUserPageOffset
-    output: false
-  ↓Call_Sequence [steps.SequenceStep-1776185313085]: 
-    sourceSequence: lib_LDAP.exportDirectoryAccountsAndGroups
-    ↓adminUser [variables.StepVariable-1776185313087]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./adminUser/text()
-    ↓ldapServer [variables.StepVariable-1776185313089]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./ldapServer/text()
-    ↓ldapBasePath [variables.StepVariable-1776185313091]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./ldapBasePath/text()
-    ↓adminPassword [variables.StepVariable-1776185313093]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./adminPassword/text()
-    ↓usersBasePath [variables.StepVariable-1776185313095]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./usersBasePath/text()
-    ↓userSearchFilter [variables.StepVariable-1776185313097]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./userSearchFilter/text()
-    ↓userExclusionFilter [variables.StepVariable-1776185313099]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./userExclusionFilter/text()
-    ↓includeUsers [variables.StepVariable-1776185313101]: 
-      value: true
-    ↓includeGroups [variables.StepVariable-1776185313103]: 
-      value: false
-    ↓emitUsersXML [variables.StepVariable-1776185313105]: 
-      value: false
-    ↓emitGroupsXML [variables.StepVariable-1776185313107]: 
-      value: false
-    ↓emitSummaryXML [variables.StepVariable-1776185313109]: 
-      value: true
-    ↓emitUsersJSON [variables.StepVariable-1776185313111]: 
-      value: true
-    ↓emitGroupsJSON [variables.StepVariable-1776185313113]: 
-      value: false
-    ↓emitDirectoryJSON [variables.StepVariable-1776185313115]: 
-      value: false
-    ↓emitAttributesJSON [variables.StepVariable-1776185313117]: 
-      value: false
-    ↓includeRDN [variables.StepVariable-1776185313119]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./includeRDN/text()
-    ↓countLimit [variables.StepVariable-1776185313121]: 
-      value: 0.0
-    ↓timeLimit [variables.StepVariable-1776185313123]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./timeLimit/text()
-    ↓userReturnedAttributes [variables.StepMultiValuedVariable-1776185313125]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1774272301000
-            - java.lang.String: 
-              - ↑value: ./userReturnedAttributes/text()
-    ↓userPageSize [variables.StepVariable-1776185313127]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1776185313081
-            - java.lang.String: 
-              - ↑value: ./text()
-    ↓userPageCookie [variables.StepVariable-1776185313129]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1776185313083
-            - java.lang.String: 
-              - ↑value: ./text()
-    ↓userAutoPage [variables.StepVariable-1780564772516]: 
-      value: true
-    ↓userPageOffset [variables.StepVariable-1780565717097]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1780565717095
-            - java.lang.String: 
-              - ↑value: ./text()
-  ↓directoryUsersJson [steps.SimpleSourceStep-1776185313131]: 
-    sourceDefinition: 
-      - xmlizable: 
-        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-        - com.twinsoft.convertigo.beans.common.XMLVector: 
-          - java.lang.String: 
-            - ↑value: 1776185313085
-          - java.lang.String: 
-            - ↑value: ./document/usersJSONSTR/text()
-    variableName: directoryUsersJson
-  ↓Next_User_Page_Cookie [steps.SimpleSourceStep-1776185313133]: 
-    sourceDefinition: 
-      - xmlizable: 
-        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-        - com.twinsoft.convertigo.beans.common.XMLVector: 
-          - java.lang.String: 
-            - ↑value: 1776185313085
-          - java.lang.String: 
-            - ↑value: ./document/summary/nextUserPageCookie/text()
-    variableName: nextUserPageCookieValue
-  ↓Users_Has_More_Pages [steps.SimpleSourceStep-1776185313135]: 
-    sourceDefinition: 
-      - xmlizable: 
-        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-        - com.twinsoft.convertigo.beans.common.XMLVector: 
-          - java.lang.String: 
-            - ↑value: 1776185313085
-          - java.lang.String: 
-            - ↑value: ./document/summary/usersHasMorePages/text()
-    variableName: usersHasMorePagesRaw
-  ↓LDAP_Users_Processed_Pages_Count [steps.SimpleSourceStep-1780564772514]: 
-    sourceDefinition: 
-      - xmlizable: 
-        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-        - com.twinsoft.convertigo.beans.common.XMLVector: 
-          - java.lang.String: 
-            - ↑value: 1776185313085
-          - java.lang.String: 
-            - ↑value: ./document/summary/usersProcessedPagesCount/text()
-    variableName: ldapUsersProcessedPagesCount
+  ↓Next_Directory_Page [steps.SimpleStep-1790000000009]: 
+    expression: |
+      'directoryPageUsers = directorySnapshot.entries.slice(currentUserPageOffset, currentUserPageOffset + requestedPageSizeValue);
+      keepContextAlive();'
   ↓Build_Forms_Payload [steps.SimpleStep-1776185313137]: 
     expression: |
-      'var users = [];
-      try {
-          users = directoryUsersJson !== undefined && directoryUsersJson !== null && normalizeOptionalText(directoryUsersJson) !== "" ? JSON.parse("" + directoryUsersJson) : [];
-      }
-      catch (e) {
-          users = [];
-      }
+      'var users = directoryPageUsers !== null && directoryPageUsers !== undefined ? directoryPageUsers : [];
       var normalizeAttributeNames = function(value, fallbackValues) {
           var values = splitStringValues(value);
           if (values.length === 0) {
@@ -742,6 +1027,25 @@ responseTimeout: 600
               logUserSync("warn", "page " + currentPageIndex + " skipped user DN=\"" + distinguishedNameValue + "\" because no account identifier was found in [" + accountNameAttributeNames.join(",") + "]");
               continue;
           }
+          if (!matchesAccountNamePattern(accountName)) {
+              pageFilteredOutUsersCount++;
+              logUserSync("info", "page " + currentPageIndex + " filtered out user DN=\"" + distinguishedNameValue + "\" because \"" + accountName + "\" does not match userAccountNamePattern");
+              continue;
+          }
+          var expiry = getExpiryStatus(entry);
+          if (expiry.status === "expired") {
+              pageFilteredOutUsersCount++;
+              expiredUsersCount++;
+              logUserSync("info", "page " + currentPageIndex + " filtered out user \"" + accountName + "\" because " + userExpiryAttributeValue + "=\"" + expiry.value + "\" is expired");
+              continue;
+          }
+          if (expiry.status === "unparseable") {
+              unparseableExpiryDatesCount++;
+              if (unparseableExpiryDates.length < 20) {
+                  unparseableExpiryDates.push(accountName + "=" + expiry.value);
+              }
+              logUserSync("warn", "page " + currentPageIndex + " kept user \"" + accountName + "\" because " + userExpiryAttributeValue + "=\"" + expiry.value + "\" does not match " + userExpiryDateFormatValue);
+          }
           var groupName = formsGroupPrefixValue + accountName;
           var mailValue = getFirstEntryValue(entry, mailAttributeNames);
           var displayNameValue = buildConfiguredDisplayName(entry, givenNameAttributeNames, surnameAttributeNames);
@@ -768,7 +1072,7 @@ responseTimeout: 600
               user: accountName,
               group: groupName
           });
-          var directoryGroups = readDirectoryGroupsForUser(distinguishedNameValue);
+          var directoryGroups = resolveDirectoryGroupsForUser(distinguishedNameValue);
           if (directoryGroups.length > 0) {
               logUserSync("info", "page " + currentPageIndex + " prepared " + directoryGroups.length + " directory group mapping(s) for user \"" + accountName + "\" : " + directoryGroups.join(","));
           }
@@ -835,6 +1139,36 @@ responseTimeout: 600
               }
               groupMapping.user = normalizeFormsIdentifier(groupMapping.user);
               groupMapping.group = normalizeReservedGroupName(groupMapping.group);
+          }
+      }
+      // With lib_FullSyncGrp delegation, an unauthenticated bulk containing one protected group is rejected as a whole:
+      // keep the other memberships and report the protected ones.
+      if (fullSyncGrpDelegationEnabled && groupMappings.length > 0 && !hasAuthenticatedUser()) {
+          try {
+              var mappingGroups = [];
+              for (var mappingGroupIndex = 0; mappingGroupIndex < groupMappings.length; mappingGroupIndex++) {
+                  if (mappingGroups.indexOf(groupMappings[mappingGroupIndex].group) === -1) {
+                      mappingGroups.push(groupMappings[mappingGroupIndex].group);
+                  }
+              }
+              var protectedMappingGroups = findProtectedGroups(mappingGroups);
+              var allowedMappings = [];
+              for (var allowedIndex = 0; allowedIndex < groupMappings.length; allowedIndex++) {
+                  var candidateGroup = groupMappings[allowedIndex].group;
+                  if (protectedMappingGroups[candidateGroup]) {
+                      protectedGroupMappingsSkippedCount++;
+                      if (protectedGroupsSkipped.indexOf(candidateGroup) === -1 && protectedGroupsSkipped.length < 20) {
+                          protectedGroupsSkipped.push(candidateGroup);
+                      }
+                  }
+                  else {
+                      allowedMappings.push(groupMappings[allowedIndex]);
+                  }
+              }
+              groupMappings = allowedMappings;
+          }
+          catch (e) {
+              logUserSyncStatus("warn", "page " + (totalProcessedPages + 1) + " could not check lib_FullSyncGrp delegation: " + e);
           }
       }
       var formsDocumentsForWrite = [];
@@ -1002,81 +1336,377 @@ responseTimeout: 600
                 - ↑value: 1776185313151
               - java.lang.String: 
                 - ↑value: .
+    ↓Group_Mappings_Write_Error [steps.SourceStep-1790000000015]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1776185313165
+            - java.lang.String: 
+              - ↑value: ./document/error
+      variableName: groupMappingsWriteErrorNodes
+    ↓Check_Group_Mappings_Write [steps.SimpleStep-1790000000016]: 
+      expression: |
+        'var groupMappingsWriteError = "";
+        try {
+            if (groupMappingsWriteErrorNodes !== null && groupMappingsWriteErrorNodes !== undefined && groupMappingsWriteErrorNodes.getLength !== undefined && groupMappingsWriteErrorNodes.getLength() > 0) {
+                groupMappingsWriteError = normalizeOptionalText(groupMappingsWriteErrorNodes.item(0).getTextContent()).replace(/\s+/g, " ");
+                if (groupMappingsWriteError === "") {
+                    groupMappingsWriteError = "unknown error";
+                }
+            }
+        }
+        catch (e) {
+            groupMappingsWriteError = "" + e;
+        }
+        if (groupMappingsWriteError !== "") {
+            groupMappingWriteErrorsCount++;
+            if (groupMappingWriteErrors.length < 5) {
+                groupMappingWriteErrors.push("page " + (totalProcessedPages + 1) + ": " + groupMappingsWriteError);
+            }
+            logUserSyncStatus("error", "page " + (totalProcessedPages + 1) + " lib_FullSyncGrp.SetUserInGroupBulk rejected " + groupMappings.length + " membership(s): " + groupMappingsWriteError);
+        }'
   ↓Advance_Pagination [steps.SimpleStep-1776185313169]: 
     expression: |
       'totalProcessedPages++;
-      var previousUserPageOffset = currentUserPageOffset;
-      var normalizedNextCookie = normalizeOptionalText(nextUserPageCookieValue);
-      var ldapUsersProcessedPagesCountValue = parseInteger(ldapUsersProcessedPagesCount, 0);
-      lastUsersHasMorePagesValue = parseBoolean(usersHasMorePagesRaw, false);
-      lastNextUserPageCookiePresent = normalizedNextCookie !== "";
-      lastUserPageWasFull = currentUserPageSize > 0 && pageUsersFromDirectoryCount >= currentUserPageSize;
-      usersHasMorePagesValue = lastUsersHasMorePagesValue;
-      paginationStopReason = "";
-      if (currentUserPageIsDuplicate) {
-          usersHasMorePagesValue = false;
-          paginationStopReason = "duplicate LDAP page detected";
-      }
-      if (remainingUsersLimit > 0) {
-          remainingUsersLimit -= pageUsersFromDirectoryCount;
-          if (remainingUsersLimit <= 0) {
-              remainingUsersLimit = 0;
-              usersHasMorePagesValue = false;
-              paginationStopReason = "countLimit reached";
-          }
-      }
       currentUserPageOffset += pageUsersFromDirectoryCount;
-      if (usersHasMorePagesValue && currentUserPageOffset === previousUserPageOffset) {
-          usersHasMorePagesValue = false;
-          paginationStopReason = "pagination did not advance";
-      }
-      
-      if (usersHasMorePagesValue) {
-          if (normalizedNextCookie === "" || normalizedNextCookie === currentUserPageCookie) {
-              if (normalizedNextCookie === "") {
-                  paginationStopReason = "missing next LDAP page cookie";
-                  usersHasMorePagesValue = false;
-                  currentUserPageCookie = "";
-              }
-              else {
-                  currentUserPageCookie = normalizedNextCookie;
-              }
-          }
-          else {
-              currentUserPageCookie = normalizedNextCookie;
-          }
-      }
-      else {
-          if (paginationStopReason === "") {
-              paginationStopReason = ldapUsersProcessedPagesCountValue > 1 ? "LDAP auto-paging completed" : (lastUserPageWasFull && configuredCountLimitValue <= 0 ? "LDAP reported no more pages after a full page" : "LDAP reported last page");
-          }
-          currentUserPageCookie = "";
-      }
-      
+      lastUserPageWasFull = pageUsersFromDirectoryCount >= requestedPageSizeValue;
+      usersHasMorePagesValue = !currentUserPageIsDuplicate && pageUsersFromDirectoryCount > 0 && currentUserPageOffset < directorySnapshot.entries.length;
+      lastUsersHasMorePagesValue = usersHasMorePagesValue;
+      lastNextUserPageCookiePresent = false;
+      paginationStopReason = usersHasMorePagesValue ? "" : (currentUserPageIsDuplicate ? "duplicate LDAP page detected" : directorySnapshot.stopReason);
       currentUserPageSize = requestedPageSizeValue;
-      if (remainingUsersLimit > 0 && currentUserPageSize > remainingUsersLimit) {
-          currentUserPageSize = remainingUsersLimit;
-      }
-      if (currentUserPageSize <= 0) {
-          usersHasMorePagesValue = false;
-          if (paginationStopReason === "") {
-              paginationStopReason = "page size exhausted";
-          }
-      }
       groupMappings = [];
       formsDocumentsJSON = "[]";
       formsDocumentAcls = [];
-      directoryUsersJson = "";
+      directoryPageUsers = null;
+      keepContextAlive();
+      logUserSyncStatus("info", "Forms synchronization progress: " + currentUserPageOffset + "/" + directorySnapshot.entries.length + " directory entries processed");
       shouldClearCache = dryRunValue !== true && clearCacheAfterSyncValue === true && (shouldWriteToFormsAny || shouldSyncReservedGroupsAny);'
+↓If_Reconcile_Absent_Users [steps.IfStep-1790000000001]: 
+  condition: reconcileAbsentUsersValue === true
+  ↓Reconcile_Absent_Users [steps.SimpleStep-1790000000002]: 
+    expression: |
+      '// Hide Forms profiles missing from the complete directory read, remove their memberships and reactivate returning users.
+      var reconciliationStarted = new Date().getTime();
+      var reconciliationFullSyncContext = null;
+      var reconciliationPreviousAclPolicy = null;
+      reconciliationReport = {
+          enabled: true,
+          dryRun: dryRunValue === true,
+          success: false,
+          provider: formsProviderValue,
+          groupPrefix: formsGroupPrefixValue,
+          directoryPagesCount: 0,
+          directoryUsersCount: 0,
+          duplicateDirectoryUsersCount: 0,
+          profilesCheckedCount: 0,
+          disabled: [],
+          alreadyDisabledCount: 0,
+          reactivated: [],
+          membershipsToRemove: 0,
+          membershipsRemoved: 0,
+          skipped: [],
+          missingIdentity: [],
+          errors: []
+      };
+      var reconciliationProgress = function(phase, processed, total) {
+          context.lastAccessTime = java.lang.System.currentTimeMillis();
+          logUserSyncStatus("info", "reconciliation " + phase + " " + processed + "/" + total + " elapsedMs=" + (new Date().getTime() - reconciliationStarted));
+      };
+      try {
+          if (configuredCountLimitValue > 0) {
+              throw new Error("countLimit restricts the synchronized scope; reconciliation requires countLimit=0");
+          }
+          if (typeof getFirstEntryValue !== "function" || !accountNameAttributeNames) {
+              throw new Error("Forms payload helpers are not initialized");
+          }
+          var reconcileCaseSensitive = parseBoolean(casesensitive, true);
+          var presentIds = {};
+          var presentFoldedIds = {};
+          if (directorySnapshot.complete !== true) {
+              throw new Error("The directory read is incomplete (" + directorySnapshot.stopReason + "); reconciliation refused");
+          }
+          reconciliationReport.directoryPagesCount = directorySnapshot.pagesCount;
+          var snapshot = directorySnapshot.entries;
+          for (var i = 0; i < snapshot.length; i++) {
+              var entry = snapshot[i];
+              if (!containsAnyMarker(entry.distinguishedName, userDistinguishedNameMarkersValue)) {
+                  continue;
+              }
+              var accountName = getFirstEntryValue(entry, accountNameAttributeNames);
+              if (accountName === "") {
+                  reconciliationReport.missingIdentity.push(entry.distinguishedName);
+                  continue;
+              }
+              if (!matchesAccountNamePattern(accountName) || getExpiryStatus(entry).status === "expired") {
+                  continue;
+              }
+              var presentId = formsGroupPrefixValue + (reconcileCaseSensitive ? accountName : accountName.toLowerCase());
+              if (presentIds["id:" + presentId]) {
+                  reconciliationReport.duplicateDirectoryUsersCount++;
+                  continue;
+              }
+              presentIds["id:" + presentId] = true;
+              presentFoldedIds["id:" + presentId.toLowerCase()] = true;
+              reconciliationReport.directoryUsersCount++;
+          }
+          if (reconciliationReport.missingIdentity.length > 0) {
+              var missingCount = reconciliationReport.missingIdentity.length;
+              reconciliationReport.missingIdentity = reconciliationReport.missingIdentity.slice(0, 20);
+              throw new Error(missingCount + " directory user(s) in scope have no account identifier in [" + accountNameAttributeNames.join(",") + "]; exclude them with userExclusionFilter");
+          }
+          if (reconciliationReport.directoryUsersCount === 0) {
+              throw new Error("The directory snapshot contains no user in scope; reconciliation refused");
+          }
+          var fs = com.twinsoft.convertigo.engine.Engine.theApp.couchDbManager.getFullSyncClient();
+          reconciliationFullSyncContext = com.twinsoft.convertigo.engine.providers.couchdb.FullSyncContext.get();
+          reconciliationPreviousAclPolicy = reconciliationFullSyncContext.getFsAclPolicy();
+          reconciliationFullSyncContext.setFsAclPolicy(com.twinsoft.convertigo.engine.enums.FullSyncAclPolicy.noOp);
+          var HashMap = java.util.HashMap;
+          var policies = com.twinsoft.convertigo.engine.enums.CouchPostDocumentPolicy;
+          var toJson = function(value) {
+              return JSON.parse("" + value);
+          };
+          // Read profiles by _id range: does not depend on C8Oforms view versions or on the provider name.
+          var absent = [];
+          var toReactivate = [];
+          var lastProfileId = null;
+          var profilesBatchSize = 1000;
+          while (true) {
+              var profilesQuery = new HashMap();
+              profilesQuery.put("include_docs", "true");
+              profilesQuery.put("limit", "" + profilesBatchSize);
+              profilesQuery.put("endkey", JSON.stringify(formsGroupPrefixValue + "￰"));
+              if (lastProfileId === null) {
+                  profilesQuery.put("startkey", JSON.stringify(formsGroupPrefixValue));
+              }
+              else {
+                  profilesQuery.put("startkey", JSON.stringify(lastProfileId));
+                  profilesQuery.put("skip", "1");
+              }
+              var profiles = toJson(fs.getAllDocs("c8oforms_fs", profilesQuery));
+              if (profiles.error || !Array.isArray(profiles.rows)) {
+                  throw new Error("Cannot read Forms user profiles");
+              }
+              for (var r = 0; r < profiles.rows.length; r++) {
+                  lastProfileId = profiles.rows[r].id;
+                  var doc = profiles.rows[r].doc;
+                  if (!doc || !doc._id || doc._id.indexOf(formsGroupPrefixValue) !== 0 || doc.provider != formsProviderValue) {
+                      continue;
+                  }
+                  // Previously hidden profiles are included so that a failed membership cleanup is retried.
+                  if (!(doc.c8o_view_type_users == true || doc.ldap_sync_disabled === true)) {
+                      continue;
+                  }
+                  reconciliationReport.profilesCheckedCount++;
+                  if (presentIds["id:" + doc._id]) {
+                      if (doc.ldap_sync_disabled === true) {
+                          toReactivate.push(doc);
+                      }
+                      continue;
+                  }
+                  if (presentFoldedIds["id:" + doc._id.toLowerCase()]) {
+                      // Never hide a case variant of a directory user: lowercase migration is handled by C8Oforms.
+                      reconciliationReport.skipped.push({ id: doc._id, reason: "case_variant_of_directory_user" });
+                      continue;
+                  }
+                  var login = doc["~c8oAcl"] || doc._c8oAcl || doc._id.substring(formsGroupPrefixValue.length);
+                  if (!login || doc._id != formsGroupPrefixValue + login) {
+                      // Preserve ambiguous profiles and their memberships; continue with other users.
+                      reconciliationReport.skipped.push({ id: doc._id, reason: "inconsistent_profile_identity" });
+                      continue;
+                  }
+                  absent.push({ doc: doc, login: login, memberships: [] });
+                  if (doc.ldap_sync_disabled === true && doc.c8o_view_type_users != true) {
+                      reconciliationReport.alreadyDisabledCount++;
+                  }
+                  else {
+                      reconciliationReport.disabled.push(doc._id);
+                  }
+              }
+              if (profiles.rows.length < profilesBatchSize) {
+                  break;
+              }
+          }
+          for (var i = 0; i < toReactivate.length; i++) {
+              reconciliationReport.reactivated.push(toReactivate[i]._id);
+          }
+          reconciliationProgress("profiles compared", reconciliationReport.profilesCheckedCount, reconciliationReport.profilesCheckedCount);
+          // Resolve all memberships in bounded multi-key requests before any write.
+          for (var offset = 0; offset < absent.length; offset += 200) {
+              var candidates = absent.slice(offset, offset + 200);
+              var byLogin = {};
+              var keys = [];
+              for (var i = 0; i < candidates.length; i++) {
+                  byLogin["user:" + candidates[i].login] = candidates[i];
+                  keys.push(candidates[i].login);
+              }
+              var membershipsQuery = new HashMap();
+              membershipsQuery.put("reduce", "false");
+              membershipsQuery.put("include_docs", "true");
+              var memberships = toJson(fs.postView("c8ofullsyncgrp", "design", "get_groups_by_user", membershipsQuery,
+                  new org.codehaus.jettison.json.JSONObject(JSON.stringify({ keys: keys }))));
+              if (memberships.error || !Array.isArray(memberships.rows)) {
+                  throw new Error("Cannot read group memberships");
+              }
+              for (var r = 0; r < memberships.rows.length; r++) {
+                  var member = memberships.rows[r].doc;
+                  if (!member || !member._id || !member._rev || member.type != "c8oGrp" || !byLogin["user:" + member.user]) {
+                      throw new Error("Invalid group membership in batch response");
+                  }
+                  byLogin["user:" + member.user].memberships.push(member);
+              }
+              reconciliationProgress("memberships read", offset + candidates.length, absent.length);
+          }
+          // With lib_FullSyncGrp delegation, memberships of protected groups are never removed by this unauthenticated sync.
+          var absentMembershipGroups = [];
+          for (var i = 0; i < absent.length; i++) {
+              for (var r = 0; r < absent[i].memberships.length; r++) {
+                  if (absentMembershipGroups.indexOf(absent[i].memberships[r].group) === -1) {
+                      absentMembershipGroups.push(absent[i].memberships[r].group);
+                  }
+              }
+          }
+          var protectedAbsentGroups = findProtectedGroups(absentMembershipGroups);
+          reconciliationReport.membershipsSkippedProtected = 0;
+          reconciliationReport.protectedGroups = [];
+          for (var i = 0; i < absent.length; i++) {
+              var removableMemberships = [];
+              for (var r = 0; r < absent[i].memberships.length; r++) {
+                  var membershipGroup = absent[i].memberships[r].group;
+                  if (protectedAbsentGroups[membershipGroup]) {
+                      reconciliationReport.membershipsSkippedProtected++;
+                      if (reconciliationReport.protectedGroups.indexOf(membershipGroup) === -1) {
+                          reconciliationReport.protectedGroups.push(membershipGroup);
+                      }
+                  }
+                  else {
+                      removableMemberships.push(absent[i].memberships[r]);
+                  }
+              }
+              absent[i].memberships = removableMemberships;
+              reconciliationReport.membershipsToRemove += removableMemberships.length;
+          }
+          var writeBulk = function(database, docs, overrideKeys) {
+              var succeeded = {};
+              var rules = new HashMap();
+              for (var k = 0; k < overrideKeys.length; k++) {
+                  rules.put(java.util.Collections.singletonList(new java.lang.String(overrideKeys[k])), new java.lang.String("override"));
+              }
+              for (var offset = 0; offset < docs.length; offset += 200) {
+                  var chunk = docs.slice(offset, offset + 200);
+                  reconciliationWroteDocuments = true;
+                  // Hash filtering omits unchanged documents from the response. Require an acknowledgement for every document.
+                  var result = toJson(fs.postBulkDocs(database, new org.codehaus.jettison.json.JSONArray(JSON.stringify(chunk)), false, true, policies.merge, rules, false));
+                  var items = result.items;
+                  if (!Array.isArray(items) || items.length != chunk.length) {
+                      throw new Error("Invalid bulk response from " + database + ": expected=" + chunk.length + ", received=" + (Array.isArray(items) ? items.length : "missing items"));
+                  }
+                  for (var k = 0; k < items.length; k++) {
+                      if (items[k].id != chunk[k]._id) {
+                          throw new Error("Unexpected bulk response identity from " + database);
+                      }
+                      if (items[k].ok === true) {
+                          succeeded["id:" + chunk[k]._id] = true;
+                      }
+                      else {
+                          reconciliationReport.errors.push("Bulk write failed in " + database + " for " + chunk[k]._id);
+                      }
+                  }
+                  reconciliationProgress("documents written to " + database, offset + chunk.length, docs.length);
+              }
+              return succeeded;
+          };
+          if (reconciliationReport.dryRun !== true) {
+              var reactivatedProfiles = [];
+              for (var i = 0; i < toReactivate.length; i++) {
+                  reactivatedProfiles.push({ _id: toReactivate[i]._id, c8o_view_type_users: true, ldap_sync_disabled: false, ldap_sync_disabled_at: null });
+              }
+              writeBulk("c8oforms_fs", reactivatedProfiles, ["c8o_view_type_users", "ldap_sync_disabled", "ldap_sync_disabled_at"]);
+              var hiddenProfiles = [];
+              for (var i = 0; i < absent.length; i++) {
+                  hiddenProfiles.push({
+                      _id: absent[i].doc._id, c8o_view_type_users: false, ldap_sync_disabled: true,
+                      ldap_sync_disabled_at: absent[i].doc.ldap_sync_disabled_at || new Date().toISOString(), groups: {}
+                  });
+              }
+              var hidden = writeBulk("c8oforms_fs", hiddenProfiles, ["c8o_view_type_users", "ldap_sync_disabled", "ldap_sync_disabled_at", "groups"]);
+              var deletions = [];
+              for (var i = 0; i < absent.length; i++) {
+                  // Never remove memberships if the profile could not be hidden.
+                  if (!hidden["id:" + absent[i].doc._id]) {
+                      continue;
+                  }
+                  for (var r = 0; r < absent[i].memberships.length; r++) {
+                      var member = absent[i].memberships[r];
+                      deletions.push({ _id: member._id, _rev: member._rev, _deleted: true });
+                  }
+              }
+              for (var offset = 0; offset < deletions.length; offset += 200) {
+                  var chunk = deletions.slice(offset, offset + 200);
+                  reconciliationWroteDocuments = true;
+                  // Preserve revision conflict checks; do not overwrite a concurrently changed membership.
+                  var deleted = toJson(fs.postBulkDocs("c8ofullsyncgrp", new org.codehaus.jettison.json.JSONArray(JSON.stringify(chunk)), false, true, policies.none, new HashMap(), false));
+                  if (!Array.isArray(deleted.items) || deleted.items.length != chunk.length) {
+                      throw new Error("Invalid membership deletion response");
+                  }
+                  for (var r = 0; r < deleted.items.length; r++) {
+                      if (deleted.items[r].id != chunk[r]._id) {
+                          throw new Error("Unexpected membership deletion identity");
+                      }
+                      if (deleted.items[r].ok === true) {
+                          reconciliationReport.membershipsRemoved++;
+                      }
+                      else if (deleted.items[r].error != "not_found") {
+                          reconciliationReport.errors.push("Could not remove membership " + chunk[r]._id);
+                      }
+                  }
+                  reconciliationProgress("memberships removed", offset + chunk.length, deletions.length);
+              }
+          }
+          reconciliationReport.success = reconciliationReport.errors.length === 0;
+      }
+      catch (e) {
+          reconciliationReport.success = false;
+          reconciliationReport.errors.push("" + e);
+      }
+      finally {
+          if (reconciliationFullSyncContext !== null) {
+              reconciliationFullSyncContext.setFsAclPolicy(reconciliationPreviousAclPolicy);
+          }
+      }
+      logUserSyncStatus(reconciliationReport.success ? "info" : "error", "reconciliation " + (reconciliationReport.success ? "completed" : "failed") + ": dryRun=" + reconciliationReport.dryRun + ", directoryUsers=" + reconciliationReport.directoryUsersCount + ", profilesChecked=" + reconciliationReport.profilesCheckedCount + ", disabled=" + reconciliationReport.disabled.length + ", alreadyDisabled=" + reconciliationReport.alreadyDisabledCount + ", reactivated=" + reconciliationReport.reactivated.length + ", membershipsToRemove=" + reconciliationReport.membershipsToRemove + ", membershipsRemoved=" + reconciliationReport.membershipsRemoved + ", skipped=" + reconciliationReport.skipped.length + ", errors=" + JSON.stringify(reconciliationReport.errors));'
 ↓Finalize_Summary [steps.SimpleStep-1776185313171]: 
   expression: |
-    'shouldClearCache = dryRunValue !== true && clearCacheAfterSyncValue === true && (shouldWriteToFormsAny || shouldSyncReservedGroupsAny);
+    'shouldClearCache = dryRunValue !== true && clearCacheAfterSyncValue === true && (shouldWriteToFormsAny || shouldSyncReservedGroupsAny || reconciliationWroteDocuments);
     skippedUsersJSON = "[]";
     syncSummary = {
         dryRun: dryRunValue,
         formsGroupPrefix: formsGroupPrefixValue,
         formsProvider: formsProviderValue,
         formsLanguage: formsLanguageValue,
+        userSearchFilter: resolvedUserSearchFilterValue,
+        userExclusionFilter: resolvedUserExclusionFilterValue,
+        userAccountNamePattern: userAccountNamePatternValue,
+        userExpiryAttribute: userExpiryAttributeValue,
+        userExpiryDateFormat: userExpiryAttributeValue !== "" ? userExpiryDateFormatValue : "",
+        userExpiryGraceDays: userExpiryGraceDaysValue,
+        expiredUsersCount: expiredUsersCount,
+        unparseableExpiryDatesCount: unparseableExpiryDatesCount,
+        unparseableExpiryDates: unparseableExpiryDates,
+        directoryEntriesCount: directorySnapshot.entries.length,
+        directoryReadComplete: directorySnapshot.complete,
+        directoryReadStopReason: directorySnapshot.stopReason,
+        groupLookupMode: groupLookupModeValue,
+        fullSyncGrpDelegationEnabled: fullSyncGrpDelegationEnabled,
+        protectedGroupMappingsSkippedCount: protectedGroupMappingsSkippedCount,
+        protectedGroupsSkipped: protectedGroupsSkipped,
+        groupMappingWriteErrorsCount: groupMappingWriteErrorsCount,
+        groupMappingWriteErrors: groupMappingWriteErrors,
+        preloadedDirectoryGroupsCount: preloadedDirectoryGroupsCount,
+        preloadedGroupMembershipsCount: preloadedGroupMembershipsCount,
         includeDirectoryGroups: includeDirectoryGroupsValue,
         groupsBasePath: groupsBasePathValue,
         groupSearchFilter: groupSearchFilterValue,
@@ -1104,7 +1734,8 @@ responseTimeout: 600
         formsWriteOkDocumentsCount: formsWriteOkDocumentsCount,
         formsWriteErrorDocumentsCount: formsWriteErrorDocumentsCount,
         shouldSyncReservedGroups: shouldSyncReservedGroupsAny,
-        shouldClearCache: shouldClearCache
+        shouldClearCache: shouldClearCache,
+        reconciliation: reconciliationReport
     };
     syncSummaryJSON = JSON.stringify(syncSummary);'
 ↓Skipped_Users_JSON [steps.ElementStep-1774272301038]: 
@@ -1211,6 +1842,19 @@ responseTimeout: 600
   ↓preparedGroupMappingsCount [steps.ElementStep-1780071844157]: 
     expression: syncSummary.preparedGroupMappingsCount
     nodeName: preparedGroupMappingsCount
+↓Reconciliation_report [steps.JsonToXmlStep-1790000000003]: 
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: reconciliationReport
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: reconciliation
 ↓If_Clear_Cache [steps.IfStep-1774272301094]: 
   condition: shouldClearCache
   ↓clearCacheEntries [steps.SimpleStep-1774272301096]: 
@@ -1233,19 +1877,31 @@ responseTimeout: 600
 ↓usersBasePath [variables.RequestableVariable-1774272301106]: 
   comment: Optional LDAP base DN dedicated to user extraction. Falls back to ldapBasePath when empty.
 ↓userSearchFilter [variables.RequestableVariable-1774272301108]: 
-  comment: LDAP filter applied to the directory accounts to import into Forms. Default can be driven by symbol lib_LDAP.userSearchFilter.
+  comment: LDAP filter applied to the directory accounts to import into Forms. {{today}} or {{today:FORMAT}} (FORMAT being a Java SimpleDateFormat pattern) is replaced by the current date, e.g. (|(!(expiry=*))(expiry>={{today:yyyyMMdd}})). Default can be driven by symbol lib_LDAP.userSearchFilter.
   value: ${lib_LDAP.userSearchFilter=(&(objectCategory=person)(objectClass=user))}
 ↓userExclusionFilter [variables.RequestableVariable-1774272301110]: 
-  comment: Optional LDAP filter for directory accounts to exclude from the Forms synchronization. Default can be driven by symbol lib_LDAP.userExclusionFilter.
+  comment: Optional LDAP filter for directory accounts to exclude from the Forms synchronization. Supports the {{today}} token. Default can be driven by symbol lib_LDAP.userExclusionFilter.
   value: ${lib_LDAP.userExclusionFilter=}
+↓userAccountNamePattern [variables.RequestableVariable-1790000000007]: 
+  comment: Optional regular expression, matched case-insensitively against the account identifier (before lowercase normalization). Users that do not match are not synchronized, e.g. ^(AC750|UR[0-9]{3})[^TG]. Prefer [0-9] to backslash escapes, which must be doubled in symbol files. Default can be driven by symbol lib_LDAP.userAccountNamePattern.
+  value: ${lib_LDAP.userAccountNamePattern=}
+↓userExpiryAttribute [variables.RequestableVariable-1790000000012]: 
+  comment: Optional attribute holding the user exit date. Users whose date is strictly before today (minus userExpiryGraceDays) are not synchronized and are hidden by the reconciliation; users without a date are kept; unparseable dates are kept and reported in the summary. The date is evaluated at each run. Default can be driven by symbol lib_LDAP.userExpiryAttribute.
+  value: ${lib_LDAP.userExpiryAttribute=}
+↓userExpiryDateFormat [variables.RequestableVariable-1790000000013]: 
+  comment: Java SimpleDateFormat pattern of userExpiryAttribute, parsed strictly, e.g. dd/MM/yyyy or yyyyMMddHHmmss. Default can be driven by symbol lib_LDAP.userExpiryDateFormat.
+  value: ${lib_LDAP.userExpiryDateFormat=dd/MM/yyyy}
+↓userExpiryGraceDays [variables.RequestableVariable-1790000000014]: 
+  comment: Number of days a user is still synchronized after the exit date. 0 keeps the user up to and including the exit day. Default can be driven by symbol lib_LDAP.userExpiryGraceDays.
+  value: ${lib_LDAP.userExpiryGraceDays=0}
 ↓userDistinguishedNameMarkers [variables.RequestableVariable-1780055692091]: 
   comment: Optional comma/newline-separated distinguishedName markers. When provided, only users whose distinguishedName contains at least one marker are synchronized. Default can be driven by symbol lib_LDAP.userDistinguishedNameMarkers.
   value: ${lib_LDAP.userDistinguishedNameMarkers=}
 ↓includeRDN [variables.RequestableVariable-1774272301112]: 
-  comment: Set to true to expose parsed RDN components for each directory entry
+  comment: Kept for compatibility, not used by the synchronization.
   value: false
 ↓pageSize [variables.RequestableVariable-1776185313173]: 
-  comment: Number of directory users requested per export page. Use a value greater than 0. Default 500.
+  comment: LDAP paged results size and number of users written to Forms per batch. Use a value greater than 0. Default 500.
   value: 500.0
 ↓countLimit [variables.RequestableVariable-1774272301114]: 
   comment: Maximum number of directory users to synchronize across all pages. Use 0 for no limit.
@@ -1282,6 +1938,9 @@ responseTimeout: 600
 ↓debugUserCreationLogs [variables.RequestableVariable-1780408773455]: 
   comment: Set to true to log per-user preparation, lowercase normalization and PostBulkDocuments responses during the Forms synchronization
   value: ${lib_LDAP.debugUserCreationLogs=false}
+↓reconcileAbsentUsers [variables.RequestableVariable-1790000000004]: 
+  comment: Set to true to hide Forms profiles of this provider that are missing from a complete directory snapshot, remove their group memberships and reactivate returning users. Refused when the snapshot is incomplete, empty, limited by countLimit or contains users without account identifier. Preview with dryRun=true. Default can be driven by symbol lib_LDAP.reconcileAbsentUsers.
+  value: ${lib_LDAP.reconcileAbsentUsers=false}
 ↓userReturnedAttributes [variables.RequestableMultiValuedVariable-1774272301136]: 
   comment: LDAP attributes returned for each user. Include every attribute referenced by userAccountNameAttributes, userMailAttributes, userDisplayNameAttributes, userGivenNameAttributes and userSurnameAttributes.
   value: 
@@ -1332,10 +1991,14 @@ responseTimeout: 600
   comment: LDAP objectClass value identifying directory groups. Uses the same symbol as lib_UserManager.
   value: ${lib_UserManager.LDAP_GROUP_OBJECT_CLASS=group}
 ↓groupSearchFilter [variables.RequestableVariable-1780071694096]: 
-  comment: Advanced override for the LDAP group filter. Leave empty to use lib_UserManager.LDAP_GROUP_OBJECT_CLASS.
+  comment: Advanced override for the LDAP group filter, e.g. (&(objectClass=groupOfUniqueNames)(|(cn=GROUP_A)(cn=GROUP_B))). Leave empty to use lib_UserManager.LDAP_GROUP_OBJECT_CLASS. Supports the {{today}} token. Default can be driven by symbol lib_LDAP.groupSearchFilter.
+  value: ${lib_LDAP.groupSearchFilter=}
+↓groupLookupMode [variables.RequestableVariable-1790000000010]: 
+  comment: preload (default) reads the groups matching groupSearchFilter once and resolves memberships in memory; perUser runs one LDAP group search per user, slow for large directories. Default can be driven by symbol lib_LDAP.groupLookupMode.
+  value: ${lib_LDAP.groupLookupMode=preload}
 ↓groupMemberAttribute [variables.RequestableVariable-1780071694206]: 
-  comment: LDAP group attribute that contains the user distinguishedName. lib_UserManager currently uses uniqueMember in its group lookup.
-  value: uniqueMember
+  comment: LDAP group attribute that contains the user distinguishedName (uniqueMember for groupOfUniqueNames, member for groupOfNames or Active Directory). lib_UserManager currently uses uniqueMember in its group lookup. Default can be driven by symbol lib_LDAP.groupMemberAttribute.
+  value: ${lib_LDAP.groupMemberAttribute=uniqueMember}
 ↓groupDisplayAttributes [variables.RequestableVariable-1780071694228]: 
   comment: Comma/newline-separated group attributes used to build the Forms directory group name. Uses the same symbol as lib_UserManager.
   value: ${lib_UserManager.LDAP_GROUP_DISPLAY_ATTRIBUTE=cn}
@@ -1343,8 +2006,8 @@ responseTimeout: 600
   comment: Prefix added to LDAP directory group names before SetUserInGroupBulk. Same behavior as lib_UserManager group mappings.
   value: ad:
 ↓groupLookupCountLimit [variables.RequestableVariable-1780071694271]: 
-  comment: Maximum number of LDAP groups looked up per user. Use 0 for no limit.
+  comment: Maximum number of LDAP groups looked up per user in perUser group lookup mode. Use 0 for no limit.
   value: 0
 ↓groupLookupTimeLimit [variables.RequestableVariable-1780071694297]: 
-  comment: LDAP group lookup time limit per user in milliseconds. Use 0 for no limit.
+  comment: LDAP group lookup time limit per user in milliseconds, in perUser group lookup mode. Use 0 for no limit.
   value: 0
