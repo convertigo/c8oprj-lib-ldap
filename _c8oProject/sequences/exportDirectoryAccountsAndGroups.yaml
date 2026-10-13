@@ -1,4 +1,5 @@
-accessibility: Hidden
+accessibility: Private
+authenticatedContextRequired: false
 comment: Exports LDAP or Active Directory user accounts and groups with caller-provided filters, bases and returned attributes
 ↓Users [steps.XMLComplexStep-1774190359421]: 
   nodeName: users
