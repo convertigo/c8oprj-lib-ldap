@@ -69,7 +69,7 @@
     Works with lib_UserManager and lib_FullSyncGrp 8.0.0.19 or later, public or security builds. When the lib_FullSyncGrp group delegation is enabled (`lib.fullsyncgrp.delegation.adminGroups`), an unauthenticated synchronization skips the memberships of protected groups and the reconciliation never removes them; both are reported.
     
     `exportDirectoryAccountsAndGroups` and `searchLDAP` are Private helper sequences.'
-  version: 7.6.0.22
+  version: 7.6.0.23
   ↓c8oforms_fs [connectors.FullSyncConnector]: 🗏 connectors/c8oforms_fs.yaml
   ↓void [connectors.SqlConnector]: 🗏 connectors/void.yaml
   ↓exportDirectoryAccountsAndGroups [sequences.GenericSequence]: 🗏 sequences/exportDirectoryAccountsAndGroups.yaml
